@@ -1,0 +1,2066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Image Annotator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+/* ==========================================
+   Change Log
+   ------------------------------------------
+   2024-05-18 v1.0.0
+   - Initial release of the offline Image Annotator single file application.
+   - Implements multi-tool annotation workflow with perspective grids, calibration,
+     snapping, layers, guides, rulers, and exports.
+   ========================================== */
+
+/* ==========================================
+   Manual QA Script
+   ------------------------------------------
+   1. Launch the application and drag-drop a JPEG with EXIF rotation; verify upright display.
+   2. Use View menu presets (Fit, 100%, Actual Pixels); confirm wheel zoom around cursor and Space+drag panning.
+   3. Add two vanishing points; ensure perspective grid appears with red/yellow/blue axes and moves live.
+   4. Toggle grid planes in Layers panel and adjust spacing, subdivisions, opacity in Properties.
+   5. Draw lines, rectangles, polygons with snapping to endpoints, midpoints, guides, perspective grid; test modifier keys.
+   6. Use calibration tool to set a real-world distance; verify units and measurements auto-scale.
+   7. Inspect measurement readouts for precision stability and trailing zero trimming.
+   8. Select annotations, transform with handles, duplicate, group/ungroup, and nudge via arrow keys.
+   9. Add text annotations and adjust font properties; confirm calibrated sizing applies.
+   10. Create horizontal/vertical guides via rulers, drag, lock, hide; confirm snapping to guides.
+   11. Trigger undo/redo across edits; reload page to confirm autosave recovery.
+   12. Export project JSON and PNG; verify PNG matches annotation geometry at native size.
+   13. Navigate UI via keyboard; ensure focus outlines and ARIA labels are present.
+   ========================================== */
+
+:root {
+  color-scheme: light dark;
+  font-family: "Inter", "Segoe UI", sans-serif;
+  font-size: 14px;
+  --axis-right: #e53935;
+  --axis-left: #fdd835;
+  --axis-vertical: #1e88e5;
+  --axis-right-cvd: #ff7043;
+  --axis-left-cvd: #ffee58;
+  --axis-vertical-cvd: #64b5f6;
+  --bg-1: #f5f5f5;
+  --bg-2: #ffffff;
+  --bg-panel: rgba(255,255,255,0.94);
+  --border: #d0d0d0;
+  --border-strong: #9a9a9a;
+  --text-1: #1a1a1a;
+  --text-2: #444;
+  --accent: #1e88e5;
+  --accent-contrast: #fff;
+  --focus: rgba(30,136,229,0.5);
+  --toast-bg: rgba(0,0,0,0.8);
+  --guide: rgba(30,136,229,0.5);
+  --grid-plane-bg: rgba(30,136,229,0.08);
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-1);
+  color: var(--text-1);
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "header header header"
+    "tools canvas sidebar"
+    "footer footer footer";
+}
+
+header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  position: relative;
+  z-index: 10;
+}
+
+header h1 {
+  font-size: 1rem;
+  margin: 0 12px 0 0;
+  font-weight: 600;
+}
+
+.toolbar {
+  display: flex;
+  gap: 4px;
+}
+
+.toolbar button,
+.toolbar .menu {
+  font: inherit;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text-1);
+}
+
+.toolbar button:focus,
+.toolbar .menu:focus,
+button:focus,
+input:focus,
+select:focus,
+textarea:focus {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.toolbar button.active,
+.toolbar button:hover,
+.toolbar .menu:hover {
+  background: rgba(30,136,229,0.1);
+  border-color: rgba(30,136,229,0.2);
+}
+
+.menu {
+  position: relative;
+}
+
+.menu[aria-expanded="true"] .menu-list {
+  display: block;
+}
+
+.menu button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.menu .menu-list {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.12);
+  min-width: 180px;
+  z-index: 20;
+}
+
+.menu .menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.menu .menu-item:hover {
+  background: rgba(30,136,229,0.1);
+}
+
+#tool-column {
+  grid-area: tools;
+  display: flex;
+  flex-direction: column;
+  width: 60px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-2);
+  padding: 6px 4px;
+  gap: 6px;
+}
+
+.tool-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 40px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tool-button svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+
+.tool-button[aria-pressed="true"],
+.tool-button:hover {
+  background: rgba(30,136,229,0.12);
+  border-color: rgba(30,136,229,0.24);
+  color: var(--accent);
+}
+
+#canvas-wrapper {
+  grid-area: canvas;
+  position: relative;
+  overflow: hidden;
+  background: #202124;
+}
+
+#main-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  image-rendering: optimizeQuality;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+#ruler-horizontal,
+#ruler-vertical {
+  position: absolute;
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 11px;
+  z-index: 7;
+}
+
+#ruler-horizontal {
+  height: 24px;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+#ruler-vertical {
+  width: 24px;
+  top: 0;
+  bottom: 0;
+  left: 0;
+}
+
+#guide-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+
+#sidebar {
+  grid-area: sidebar;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  backdrop-filter: blur(14px);
+}
+
+.sidebar-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-tabs button {
+  flex: 1;
+  padding: 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  font-weight: 600;
+}
+
+.sidebar-tabs button[aria-selected="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sidebar-panel {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  display: none;
+}
+
+.sidebar-panel.active {
+  display: block;
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+}
+
+.layer-controls button,
+.annotation-controls button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.layer-controls button:hover,
+.annotation-controls button:hover {
+  background: rgba(30,136,229,0.12);
+}
+
+.properties-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.properties-grid label {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 4px;
+}
+
+.properties-grid input,
+.properties-grid select,
+.properties-grid textarea {
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  font: inherit;
+}
+
+footer {
+  grid-area: footer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--bg-2);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  gap: 8px;
+}
+
+footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+}
+
+.toast {
+  padding: 10px 16px;
+  background: var(--toast-bg);
+  color: white;
+  border-radius: 999px;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+}
+
+.toast button {
+  border: none;
+  background: rgba(255,255,255,0.2);
+  color: white;
+  border-radius: 999px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+#cheatsheet {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.4);
+  z-index: 80;
+}
+
+#cheatsheet .modal {
+  background: var(--bg-2);
+  color: var(--text-1);
+  border-radius: 12px;
+  width: min(720px, 90vw);
+  max-height: 80vh;
+  overflow: auto;
+  padding: 24px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.25);
+}
+
+#cheatsheet table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#cheatsheet th,
+#cheatsheet td {
+  border-bottom: 1px solid rgba(0,0,0,0.1);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+#drag-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(30,136,229,0.15);
+  border: 2px dashed rgba(30,136,229,0.5);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: rgba(30,136,229,0.8);
+  font-size: 1.2rem;
+  z-index: 60;
+}
+
+.toast[role="status"] {
+  aria-live: polite;
+}
+
+.hidden { display: none !important; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border: 0;
+}
+
+</style>
+</head>
+<body>
+<header>
+  <h1>Image Annotator</h1>
+  <nav class="toolbar" aria-label="File actions">
+    <div class="menu" role="menu" aria-label="File menu" aria-expanded="false">
+      <button type="button">File ▾</button>
+      <div class="menu-list" role="menu">
+        <button class="menu-item" data-action="open-image" role="menuitem">Open Image…</button>
+        <button class="menu-item" data-action="import-project" role="menuitem">Import Project…</button>
+        <button class="menu-item" data-action="save-project" role="menuitem">Save Project…</button>
+        <button class="menu-item" data-action="export-png" role="menuitem">Export PNG…</button>
+        <button class="menu-item" data-action="export-svg" role="menuitem">Export SVG…</button>
+      </div>
+    </div>
+    <div class="menu" role="menu" aria-label="View menu" aria-expanded="false">
+      <button type="button">View ▾</button>
+      <div class="menu-list">
+        <button class="menu-item" data-action="view-fit">Fit to View</button>
+        <button class="menu-item" data-action="view-100">100%</button>
+        <button class="menu-item" data-action="view-actual">Actual Pixels</button>
+      </div>
+    </div>
+    <div class="menu" role="menu" aria-label="Units menu" aria-expanded="false">
+      <button type="button">Units ▾</button>
+      <div class="menu-list">
+        <button class="menu-item" data-action="units-metric">Metric</button>
+        <button class="menu-item" data-action="units-imperial">Imperial</button>
+      </div>
+    </div>
+    <div class="menu" role="menu" aria-label="Settings menu" aria-expanded="false">
+      <button type="button">Settings ▾</button>
+      <div class="menu-list">
+        <button class="menu-item" data-action="settings-theme">Toggle Color Blind Palette</button>
+        <button class="menu-item" data-action="settings-ui-scale">UI Scale…</button>
+        <button class="menu-item" data-action="settings-stroke">Stroke Thickness…</button>
+      </div>
+    </div>
+    <div class="menu" role="menu" aria-label="Help menu" aria-expanded="false">
+      <button type="button">Help ▾</button>
+      <div class="menu-list">
+        <button class="menu-item" data-action="help-cheatsheet">Keyboard Shortcuts</button>
+        <button class="menu-item" data-action="help-about">About Image Annotator</button>
+      </div>
+    </div>
+  </nav>
+  <div class="toolbar" aria-label="Quick actions">
+    <button type="button" id="toggle-snap" aria-pressed="true">Snap: On</button>
+    <button type="button" id="toggle-grid" aria-pressed="true">Grid</button>
+  </div>
+  <input type="file" id="image-loader" accept="image/*" class="hidden">
+  <input type="file" id="project-loader" accept="application/json" class="hidden">
+</header>
+
+<aside id="tool-column" aria-label="Tool selection">
+  <button class="tool-button" data-tool="select" aria-label="Select" aria-pressed="true">✥</button>
+  <button class="tool-button" data-tool="pan" aria-label="Move Canvas">🖐</button>
+  <button class="tool-button" data-tool="point" aria-label="Point">●</button>
+  <button class="tool-button" data-tool="line" aria-label="Line">／</button>
+  <button class="tool-button" data-tool="polyline" aria-label="Polyline">〰</button>
+  <button class="tool-button" data-tool="rect" aria-label="Rectangle">▭</button>
+  <button class="tool-button" data-tool="ellipse" aria-label="Ellipse">⬭</button>
+  <button class="tool-button" data-tool="polygon" aria-label="Polygon">⬠</button>
+  <button class="tool-button" data-tool="angle" aria-label="Angle">∠</button>
+  <button class="tool-button" data-tool="triangle" aria-label="Triangle">△</button>
+  <button class="tool-button" data-tool="text" aria-label="Text">T</button>
+  <button class="tool-button" data-tool="calibrate" aria-label="Calibrate">⚖</button>
+  <button class="tool-button" data-tool="vanish" aria-label="Vanishing Point">✦</button>
+  <button class="tool-button" data-tool="grid" aria-label="Perspective Grid">▥</button>
+</aside>
+
+<main id="canvas-wrapper">
+  <canvas id="main-canvas" width="1920" height="1080" aria-label="Annotation canvas" role="presentation"></canvas>
+  <canvas id="guide-layer" width="1920" height="1080"></canvas>
+  <div id="ruler-horizontal" aria-hidden="true"></div>
+  <div id="ruler-vertical" aria-hidden="true"></div>
+  <div id="drag-overlay">Drop image or project</div>
+</main>
+
+<aside id="sidebar">
+  <div class="sidebar-tabs" role="tablist">
+    <button role="tab" id="tab-layers" aria-selected="true" aria-controls="panel-layers">Layers</button>
+    <button role="tab" id="tab-properties" aria-controls="panel-properties">Properties</button>
+    <button role="tab" id="tab-annotations" aria-controls="panel-annotations">Annotations</button>
+  </div>
+  <section id="panel-layers" class="sidebar-panel active" role="tabpanel" aria-labelledby="tab-layers">
+    <ul id="layer-list" class="list"></ul>
+    <div class="layer-actions">
+      <button type="button" data-action="layer-add-group">Add Group</button>
+    </div>
+  </section>
+  <section id="panel-properties" class="sidebar-panel" role="tabpanel" aria-labelledby="tab-properties">
+    <form id="properties-form" class="properties-grid"></form>
+  </section>
+  <section id="panel-annotations" class="sidebar-panel" role="tabpanel" aria-labelledby="tab-annotations">
+    <ul id="annotation-list" class="list"></ul>
+    <div class="annotation-actions">
+      <label class="sr-only" for="annotation-filter">Filter annotations</label>
+      <select id="annotation-filter">
+        <option value="all">All types</option>
+        <option value="point">Points</option>
+        <option value="line">Lines</option>
+        <option value="polyline">Polylines</option>
+        <option value="rect">Rectangles</option>
+        <option value="ellipse">Ellipses</option>
+        <option value="polygon">Polygons</option>
+        <option value="angle">Angles</option>
+        <option value="triangle">Triangles</option>
+        <option value="text">Text</option>
+      </select>
+    </div>
+  </section>
+</aside>
+
+<footer>
+  <span id="status-coords">0, 0</span>
+  <span id="status-zoom">100%</span>
+  <span id="status-measure">—</span>
+  <span id="status-snap">Snap: On</span>
+</footer>
+
+<div class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+<div id="cheatsheet" role="dialog" aria-modal="true" aria-labelledby="cheatsheet-title">
+  <div class="modal">
+    <header style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+      <h2 id="cheatsheet-title">Keyboard Shortcuts</h2>
+      <button type="button" data-action="close-cheatsheet">Close</button>
+    </header>
+    <p>Use these shortcuts to speed up your workflow.</p>
+    <table>
+      <thead>
+        <tr><th>Shortcut</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1</td><td>Select</td></tr>
+        <tr><td>2</td><td>Move Canvas</td></tr>
+        <tr><td>3</td><td>Line Tool</td></tr>
+        <tr><td>4</td><td>Polyline Tool</td></tr>
+        <tr><td>5</td><td>Rectangle Tool</td></tr>
+        <tr><td>6</td><td>Ellipse Tool</td></tr>
+        <tr><td>7</td><td>Polygon Tool</td></tr>
+        <tr><td>8</td><td>Angle Tool</td></tr>
+        <tr><td>9</td><td>Triangle Tool</td></tr>
+        <tr><td>0</td><td>Text Tool</td></tr>
+        <tr><td>C</td><td>Calibration Tool</td></tr>
+        <tr><td>V</td><td>Vanishing Point Tool</td></tr>
+        <tr><td>G</td><td>Toggle Grid Visibility</td></tr>
+        <tr><td>Ctrl/Cmd + Z</td><td>Undo</td></tr>
+        <tr><td>Ctrl/Cmd + Shift + Z</td><td>Redo</td></tr>
+        <tr><td>Delete</td><td>Delete Selection</td></tr>
+        <tr><td>D</td><td>Duplicate</td></tr>
+        <tr><td>G</td><td>Group Selection</td></tr>
+        <tr><td>U</td><td>Ungroup</td></tr>
+        <tr><td>Ctrl/Cmd + =</td><td>Zoom In</td></tr>
+        <tr><td>Ctrl/Cmd + -</td><td>Zoom Out</td></tr>
+        <tr><td>0</td><td>Fit to View</td></tr>
+        <tr><td>1</td><td>Zoom 100%</td></tr>
+        <tr><td>2</td><td>Actual Pixels</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+/* ==========================================================
+   Constants
+   ========================================================== */
+const App = (() => {
+  const SCHEMA_VERSION = 1;
+  const AUTOSAVE_KEY = "image-annotator-autosave";
+  const AUTOSAVE_INTERVAL = 5000;
+  const MAX_HISTORY = 200;
+  const SNAP_THRESHOLD_SQ = 9;
+  const GRID_COLORS = {
+    right: getComputedStyle(document.documentElement).getPropertyValue("--axis-right").trim() || "#E53935",
+    left: getComputedStyle(document.documentElement).getPropertyValue("--axis-left").trim() || "#FDD835",
+    vertical: getComputedStyle(document.documentElement).getPropertyValue("--axis-vertical").trim() || "#1E88E5"
+  };
+  const GRID_COLORS_CVD = {
+    right: getComputedStyle(document.documentElement).getPropertyValue("--axis-right-cvd").trim() || "#FF7043",
+    left: getComputedStyle(document.documentElement).getPropertyValue("--axis-left-cvd").trim() || "#FFEE58",
+    vertical: getComputedStyle(document.documentElement).getPropertyValue("--axis-vertical-cvd").trim() || "#64B5F6"
+  };
+  const UNIT_GROUPS = {
+    metric: [
+      { unit: "mm", factor: 0.001 },
+      { unit: "cm", factor: 0.01 },
+      { unit: "m", factor: 1 }
+    ],
+    imperial: [
+      { unit: "in", factor: 1 / 12 },
+      { unit: "ft", factor: 1 }
+    ]
+  };
+  const ANGLE_SNAP_STEPS = [0, 15, 30, 45, 60, 90];
+  const DEFAULT_LAYER_ID = "layer-annotations";
+  const DEFAULT_GRID_LAYER_ID = "layer-grid";
+
+  /* ========================================================
+     State
+     ======================================================== */
+  const appState = {
+    schemaVersion: SCHEMA_VERSION,
+    image: null,
+    viewport: {
+      zoom: 1,
+      pan: { x: 0, y: 0 },
+      dpr: window.devicePixelRatio || 1,
+      viewSize: { width: 1, height: 1 }
+    },
+    settings: {
+      units: "metric",
+      precision: { lengthDp: 2, angleDp: 1, areaDp: 2 },
+      snap: { enabled: true, angleSteps: ANGLE_SNAP_STEPS.slice() },
+      theme: {
+        axisColors: { ...GRID_COLORS },
+        strokePx: 1,
+        uiScale: 1,
+        colorBlind: false
+      }
+    },
+    calibration: null,
+    vanishingPoints: [],
+    perspectiveGrid: {
+      visible: true,
+      planes: {
+        right: { show: true, spacing: 120, subdivisions: 5, opacity: 0.3 },
+        left: { show: true, spacing: 120, subdivisions: 5, opacity: 0.3 },
+        vertical: { show: true, spacing: 120, subdivisions: 5, opacity: 0.3 }
+      },
+      snapToIntersections: false,
+      lastValid: null
+    },
+    guides: [],
+    layers: [
+      { id: DEFAULT_GRID_LAYER_ID, name: "Perspective Grid", type: "grid", visible: true, locked: false, children: [] },
+      { id: DEFAULT_LAYER_ID, name: "Annotations", type: "annotations", visible: true, locked: false, children: [] }
+    ],
+    annotations: [],
+    selection: { ids: [], bbox: null },
+    history: { stack: [], index: -1 },
+    dirty: false,
+    hoverSnap: null,
+    snappingIndex: null,
+    pendingAction: null,
+    pointerCapture: null,
+    autosaveTimer: null,
+    redrawScheduled: false,
+    lastPointer: null,
+    dragOverlayVisible: false
+  };
+
+  /* ========================================================
+     Utilities
+     ======================================================== */
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+  const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const radToDeg = r => r * 180 / Math.PI;
+  const degToRad = d => d * Math.PI / 180;
+  const dist = (ax, ay, bx, by) => Math.hypot(bx - ax, by - ay);
+  const uuid = (() => {
+    let counter = 0;
+    return () => `id-${Date.now().toString(36)}-${(counter++).toString(36)}`;
+  })();
+  const formatNumber = (value, dp) => {
+    const factor = Math.pow(10, dp);
+    const rounded = Math.round(value * factor) / factor;
+    return parseFloat(rounded.toFixed(dp)).toString();
+  };
+  const formatMeasurement = (kind, value, unit) => {
+    if (value == null || !Number.isFinite(value)) return "—";
+    const dp = appState.settings.precision[kind === "area" ? "areaDp" : kind === "angle" ? "angleDp" : "lengthDp"];
+    return `${formatNumber(value, dp)}${unit ? ` ${unit}` : ""}`;
+  };
+  const collectSnapCandidates = () => {
+    const candidates = [];
+    for (const ann of appState.annotations) {
+      if (!isAnnotationVisible(ann.id)) continue;
+      switch (ann.type) {
+        case 'line':
+        case 'polyline': {
+          for (const p of ann.geometry.points) candidates.push({ x: p.x, y: p.y, kind: 'vertex' });
+          break;
+        }
+        case 'rect': {
+          const { x, y, width, height } = ann.geometry;
+          candidates.push({ x, y, kind: 'corner' });
+          candidates.push({ x: x + width, y, kind: 'corner' });
+          candidates.push({ x: x + width, y: y + height, kind: 'corner' });
+          candidates.push({ x, y: y + height, kind: 'corner' });
+          break;
+        }
+        case 'ellipse': {
+          const { cx, cy } = ann.geometry;
+          candidates.push({ x: cx, y: cy, kind: 'center' });
+          break;
+        }
+        case 'polygon':
+        case 'triangle': {
+          const pts = ann.geometry.points || ann.geometry.rings?.[0] || [];
+          for (const p of pts) candidates.push({ x: p.x, y: p.y, kind: 'vertex' });
+          break;
+        }
+        case 'point':
+        case 'text': {
+          const { x, y } = ann.geometry;
+          candidates.push({ x, y, kind: 'point' });
+          break;
+        }
+      }
+    }
+    for (const guide of appState.guides) {
+      if (!guide.visible) continue;
+      candidates.push({ x: guide.type === 'v' ? guide.pos : null, y: guide.type === 'h' ? guide.pos : null, kind: 'guide', guide });
+    }
+    return candidates;
+  };
+
+  const snapPoint = (x, y, opts = {}) => {
+    if (!appState.settings.snap.enabled || opts.disableSnap) return { x, y, snapped: false };
+    const candidates = collectSnapCandidates();
+    let best = null;
+    let bestDist = Infinity;
+    const screen = worldToScreen(x, y);
+    for (const c of candidates) {
+      const target = worldToScreen(c.x ?? x, c.y ?? y);
+      const dx = target.x - screen.x;
+      const dy = target.y - screen.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestDist && d2 <= SNAP_THRESHOLD_SQ) {
+        bestDist = d2;
+        best = c;
+      }
+    }
+    if (!best) return { x, y, snapped: false };
+    return { x: best.x ?? x, y: best.y ?? y, snapped: true, target: best };
+  };
+  const cloneState = () => JSON.parse(JSON.stringify({
+    schemaVersion: appState.schemaVersion,
+    image: appState.image,
+    viewport: appState.viewport,
+    settings: appState.settings,
+    calibration: appState.calibration,
+    vanishingPoints: appState.vanishingPoints,
+    perspectiveGrid: appState.perspectiveGrid,
+    guides: appState.guides,
+    layers: appState.layers,
+    annotations: appState.annotations,
+    selection: appState.selection
+  }));
+  const scheduleRedraw = () => {
+    if (appState.redrawScheduled) return;
+    appState.redrawScheduled = true;
+    requestAnimationFrame(() => {
+      appState.redrawScheduled = false;
+      renderScene();
+    });
+  };
+  const toCanvasCoords = (clientX, clientY) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * appState.viewport.dpr;
+    const y = (clientY - rect.top) * appState.viewport.dpr;
+    return screenToWorld(x, y);
+  };
+  const screenToWorld = (sx, sy) => {
+    const { zoom, pan, dpr } = appState.viewport;
+    return {
+      x: (sx / dpr - pan.x) / zoom,
+      y: (sy / dpr - pan.y) / zoom
+    };
+  };
+  const worldToScreen = (wx, wy) => {
+    const { zoom, pan, dpr } = appState.viewport;
+    return {
+      x: (wx * zoom + pan.x) * dpr,
+      y: (wy * zoom + pan.y) * dpr
+    };
+  };
+  const showToast = (message, options = {}) => {
+    const container = document.querySelector('.toast-container');
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.setAttribute('role', 'status');
+    toast.textContent = message;
+    if (options.actionLabel && options.onAction) {
+      const btn = document.createElement('button');
+      btn.textContent = options.actionLabel;
+      btn.addEventListener('click', () => {
+        options.onAction();
+        if (toast.isConnected) container.removeChild(toast);
+      });
+      toast.appendChild(btn);
+    }
+    container.appendChild(toast);
+    setTimeout(() => {
+      if (toast.isConnected) container.removeChild(toast);
+    }, options.duration || 4000);
+  };
+  const confirmDiscardChanges = () => {
+    if (!appState.dirty) return Promise.resolve(true);
+    return Promise.resolve(window.confirm('Discard unsaved changes?'));
+  };
+  const updateDirtyFlag = (dirty = true) => {
+    appState.dirty = dirty;
+  };
+  const pushHistory = (label) => {
+    const snapshot = cloneState();
+    appState.history.stack = appState.history.stack.slice(0, appState.history.index + 1);
+    appState.history.stack.push({ state: snapshot, label });
+    if (appState.history.stack.length > MAX_HISTORY) {
+      appState.history.stack.shift();
+    }
+    appState.history.index = appState.history.stack.length - 1;
+    updateDirtyFlag(true);
+  };
+  const undo = () => {
+    if (appState.history.index <= 0) return;
+    appState.history.index -= 1;
+    restoreHistoryState(appState.history.stack[appState.history.index].state);
+  };
+  const redo = () => {
+    if (appState.history.index >= appState.history.stack.length - 1) return;
+    appState.history.index += 1;
+    restoreHistoryState(appState.history.stack[appState.history.index].state);
+  };
+  const restoreHistoryState = (state) => {
+    Object.assign(appState, JSON.parse(JSON.stringify({ ...appState, ...state })));
+    refreshUI();
+    scheduleRedraw();
+  };
+  const autosave = () => {
+    try {
+      const data = JSON.stringify(exportProject(false));
+      localStorage.setItem(AUTOSAVE_KEY, data);
+    } catch (err) {
+      console.error('Autosave failed', err);
+    }
+  };
+  const startAutosave = () => {
+    stopAutosave();
+    appState.autosaveTimer = setInterval(autosave, AUTOSAVE_INTERVAL);
+  };
+  const stopAutosave = () => {
+    if (appState.autosaveTimer) {
+      clearInterval(appState.autosaveTimer);
+      appState.autosaveTimer = null;
+    }
+  };
+  const loadAutosave = () => {
+    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    if (!raw) return false;
+    try {
+      const project = JSON.parse(raw);
+      importProject(project, { pushHistory: false, notify: true });
+      showToast('Recovered autosaved project');
+      return true;
+    } catch (err) {
+      console.error('Failed to parse autosave', err);
+      return false;
+    }
+  };
+  const clearAutosave = () => localStorage.removeItem(AUTOSAVE_KEY);
+  /* ========================================================
+     Geometry & Math
+     ======================================================== */
+  const polygonArea = (points) => {
+    let area = 0;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+      area += (points[j].x + points[i].x) * (points[j].y - points[i].y);
+    }
+    return area / 2;
+  };
+  const computeAnnotationMeasurements = (annotation) => {
+    const { geometry, type } = annotation;
+    const scaleRatio = appState.calibration?.scaleRatio || 1;
+    const unit = appState.calibration?.scaleUnit || 'px';
+    switch (type) {
+      case 'line': {
+        const [a, b] = geometry.points;
+        if (!a || !b) return null;
+        return { length: dist(a.x, a.y, b.x, b.y) * scaleRatio, unit };
+      }
+      case 'polyline': {
+        let length = 0;
+        for (let i = 0; i < geometry.points.length - 1; i++) {
+          const p1 = geometry.points[i];
+          const p2 = geometry.points[i + 1];
+          length += dist(p1.x, p1.y, p2.x, p2.y);
+        }
+        return { length: length * scaleRatio, unit };
+      }
+      case 'rect': {
+        const { width, height } = geometry;
+        const length = Math.hypot(width, height);
+        const area = Math.abs(width * height);
+        return { length: length * scaleRatio, area: area * scaleRatio * scaleRatio, unit };
+      }
+      case 'ellipse': {
+        const { rx, ry } = geometry;
+        const area = Math.PI * rx * ry;
+        return { area: area * scaleRatio * scaleRatio, unit };
+      }
+      case 'polygon':
+      case 'triangle': {
+        const mainRing = geometry.rings ? geometry.rings[0] : geometry.points;
+        const holes = geometry.rings ? geometry.rings.slice(1) : [];
+        let area = polygonArea(mainRing);
+        for (const hole of holes) area -= polygonArea(hole);
+        return { area: Math.abs(area) * scaleRatio * scaleRatio, unit };
+      }
+      case 'angle': {
+        const { a, b, c } = geometry;
+        const ab = { x: a.x - b.x, y: a.y - b.y };
+        const cb = { x: c.x - b.x, y: c.y - b.y };
+        const dot = ab.x * cb.x + ab.y * cb.y;
+        const mag = Math.hypot(ab.x, ab.y) * Math.hypot(cb.x, cb.y);
+        const angle = mag === 0 ? 0 : Math.acos(clamp(dot / mag, -1, 1));
+        return { angle: radToDeg(angle), unit: '°' };
+      }
+      default:
+        return null;
+    }
+  };
+
+  const computeBoundingBox = (ann) => {
+    switch (ann.type) {
+      case 'line':
+      case 'polyline': {
+        const xs = ann.geometry.points.map(p => p.x);
+        const ys = ann.geometry.points.map(p => p.y);
+        return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+      }
+      case 'rect':
+        return { x: ann.geometry.x, y: ann.geometry.y, w: ann.geometry.width, h: ann.geometry.height };
+      case 'ellipse':
+        return { x: ann.geometry.cx - ann.geometry.rx, y: ann.geometry.cy - ann.geometry.ry, w: ann.geometry.rx * 2, h: ann.geometry.ry * 2 };
+      case 'polygon':
+      case 'triangle': {
+        const pts = ann.geometry.points || ann.geometry.rings[0];
+        const xs = pts.map(p => p.x);
+        const ys = pts.map(p => p.y);
+        return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+      }
+      case 'point':
+      case 'text': {
+        const { x, y } = ann.geometry;
+        return { x: x - 2, y: y - 2, w: 4, h: 4 };
+      }
+      case 'angle': {
+        const pts = [ann.geometry.a, ann.geometry.b, ann.geometry.c];
+        const xs = pts.map(p => p.x);
+        const ys = pts.map(p => p.y);
+        return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+      }
+      default:
+        return null;
+    }
+  };
+  /* ========================================================
+     Rendering
+     ======================================================== */
+  const canvas = document.getElementById('main-canvas');
+  const ctx = canvas.getContext('2d');
+  const guideCanvas = document.getElementById('guide-layer');
+  const guideCtx = guideCanvas.getContext('2d');
+
+  const fitCanvasToContainer = () => {
+    const wrapper = document.getElementById('canvas-wrapper');
+    const { width, height } = wrapper.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    guideCanvas.style.width = `${width}px`;
+    guideCanvas.style.height = `${height}px`;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    guideCanvas.width = width * dpr;
+    guideCanvas.height = height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    guideCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    appState.viewport.dpr = dpr;
+    appState.viewport.viewSize = { width, height };
+    scheduleRedraw();
+  };
+
+  const clearCanvas = () => {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  };
+
+  const renderScene = () => {
+    clearCanvas();
+    const { zoom, pan } = appState.viewport;
+    ctx.save();
+    ctx.translate(pan.x, pan.y);
+    ctx.scale(zoom, zoom);
+    if (appState.image?.element) {
+      ctx.drawImage(appState.image.element, 0, 0, appState.image.width, appState.image.height);
+    } else {
+      ctx.fillStyle = '#2b2b2b';
+      ctx.fillRect(-10000, -10000, 20000, 20000);
+    }
+    renderPerspectiveGrid(ctx);
+    renderAnnotations(ctx);
+    if (appState.pendingAction && appState.pendingAction.tool) {
+      renderPendingAction(ctx, appState.pendingAction);
+    }
+    renderSelection(ctx);
+    ctx.restore();
+    renderGuides();
+    updateStatusFooter();
+  };
+
+  const renderPerspectiveGrid = (context) => {
+    if (!appState.perspectiveGrid.visible) return;
+    const { planes } = appState.perspectiveGrid;
+    context.save();
+    context.lineWidth = 1 / appState.viewport.zoom;
+    for (const [plane, config] of Object.entries(planes)) {
+      if (!config.show) continue;
+      context.strokeStyle = appState.settings.theme.axisColors[plane];
+      context.globalAlpha = config.opacity;
+      const spacing = config.spacing;
+      const size = 4000;
+      for (let i = -size; i <= size; i += spacing) {
+        context.beginPath();
+        if (plane === 'vertical') {
+          context.moveTo(i, -size);
+          context.lineTo(i, size);
+        } else {
+          context.moveTo(-size, i);
+          context.lineTo(size, i);
+        }
+        context.stroke();
+      }
+    }
+    context.restore();
+  };
+
+  const renderPendingAction = (context, action) => {
+    context.save();
+    context.lineWidth = 1 / appState.viewport.zoom;
+    context.setLineDash([4 / appState.viewport.zoom, 4 / appState.viewport.zoom]);
+    context.strokeStyle = '#ffffff';
+    context.fillStyle = 'rgba(255,255,255,0.15)';
+    if (action.tool === 'line' && action.start && action.temp) {
+      context.beginPath();
+      context.moveTo(action.start.x, action.start.y);
+      context.lineTo(action.temp.x, action.temp.y);
+      context.stroke();
+    } else if (action.tool === 'rect' && action.start && action.temp) {
+      context.strokeRect(action.start.x, action.start.y, action.temp.x - action.start.x, action.temp.y - action.start.y);
+    } else if (action.tool === 'ellipse' && action.start && action.temp) {
+      const rx = Math.abs(action.temp.x - action.start.x) / 2;
+      const ry = Math.abs(action.temp.y - action.start.y) / 2;
+      const cx = (action.start.x + action.temp.x) / 2;
+      const cy = (action.start.y + action.temp.y) / 2;
+      context.beginPath();
+      context.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      context.stroke();
+    }
+    context.restore();
+  };
+
+  const renderAnnotations = (context) => {
+    for (const ann of appState.annotations) {
+      const layer = findLayerContaining(ann.id);
+      if (layer && (!layer.visible || layer.locked)) continue;
+      const strokeWidth = (ann.style?.strokeWidth || 1) / appState.viewport.zoom;
+      context.save();
+      context.lineWidth = strokeWidth;
+      context.strokeStyle = ann.style?.stroke || '#ff4081';
+      context.fillStyle = ann.style?.fill || 'rgba(255,64,129,0.2)';
+      switch (ann.type) {
+        case 'point': {
+          const { x, y } = ann.geometry;
+          context.beginPath();
+          context.arc(x, y, 4 / appState.viewport.zoom, 0, Math.PI * 2);
+          context.fill();
+          break;
+        }
+        case 'line': {
+          const [a, b] = ann.geometry.points;
+          context.beginPath();
+          context.moveTo(a.x, a.y);
+          context.lineTo(b.x, b.y);
+          context.stroke();
+          break;
+        }
+        case 'polyline': {
+          context.beginPath();
+          ann.geometry.points.forEach((p, i) => i === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y));
+          context.stroke();
+          break;
+        }
+        case 'rect': {
+          const { x, y, width, height } = ann.geometry;
+          context.fillRect(x, y, width, height);
+          context.strokeRect(x, y, width, height);
+          break;
+        }
+        case 'ellipse': {
+          const { cx, cy, rx, ry } = ann.geometry;
+          context.beginPath();
+          context.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+          context.fill();
+          context.stroke();
+          break;
+        }
+        case 'polygon': {
+          ann.geometry.rings.forEach((ring, idx) => {
+            context.beginPath();
+            ring.forEach((p, i) => i === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y));
+            context.closePath();
+            if (idx === 0) context.fill('evenodd');
+            context.stroke();
+          });
+          break;
+        }
+        case 'triangle': {
+          const pts = ann.geometry.points;
+          context.beginPath();
+          pts.forEach((p, i) => i === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y));
+          context.closePath();
+          context.fill();
+          context.stroke();
+          break;
+        }
+        case 'angle': {
+          const { a, b, c } = ann.geometry;
+          context.beginPath();
+          context.moveTo(b.x, b.y);
+          context.lineTo(a.x, a.y);
+          context.moveTo(b.x, b.y);
+          context.lineTo(c.x, c.y);
+          context.stroke();
+          break;
+        }
+        case 'text': {
+          const { x, y, text, fontSize, fontFamily, fontWeight, color, background } = ann.geometry;
+          context.save();
+          const size = (fontSize || 18) / appState.viewport.zoom;
+          context.font = `${fontWeight || 400} ${size}px ${fontFamily || 'Inter, sans-serif'}`;
+          context.fillStyle = color || '#ffffff';
+          if (background) {
+            const metrics = context.measureText(text);
+            const pad = 4 / appState.viewport.zoom;
+            const width = metrics.width + pad * 2;
+            const height = size + pad * 2;
+            context.fillStyle = background;
+            context.fillRect(x - pad, y - size - pad, width, height);
+            context.fillStyle = color || '#ffffff';
+          }
+          context.fillText(text, x, y);
+          context.restore();
+          break;
+        }
+      }
+      context.restore();
+    }
+  };
+
+  const renderSelection = (context) => {
+    if (!appState.selection.ids.length) return;
+    const { bbox } = appState.selection;
+    if (!bbox) return;
+    context.save();
+    context.strokeStyle = '#4caf50';
+    context.lineWidth = 1 / appState.viewport.zoom;
+    context.setLineDash([6 / appState.viewport.zoom, 4 / appState.viewport.zoom]);
+    context.strokeRect(bbox.x, bbox.y, bbox.w, bbox.h);
+    context.restore();
+  };
+
+  const renderGuides = () => {
+    guideCtx.save();
+    guideCtx.setTransform(appState.viewport.dpr, 0, 0, appState.viewport.dpr, 0, 0);
+    guideCtx.clearRect(0, 0, guideCanvas.width, guideCanvas.height);
+    guideCtx.translate(appState.viewport.pan.x, appState.viewport.pan.y);
+    guideCtx.scale(appState.viewport.zoom, appState.viewport.zoom);
+    guideCtx.lineWidth = 1 / appState.viewport.zoom;
+    guideCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--guide');
+    for (const guide of appState.guides) {
+      if (!guide.visible) continue;
+      guideCtx.beginPath();
+      if (guide.type === 'h') {
+        guideCtx.moveTo(-9999, guide.pos);
+        guideCtx.lineTo(9999, guide.pos);
+      } else {
+        guideCtx.moveTo(guide.pos, -9999);
+        guideCtx.lineTo(guide.pos, 9999);
+      }
+      guideCtx.stroke();
+    }
+    guideCtx.restore();
+  };
+
+  const updateStatusFooter = () => {
+    const coordEl = document.getElementById('status-coords');
+    const zoomEl = document.getElementById('status-zoom');
+    const measureEl = document.getElementById('status-measure');
+    const snapEl = document.getElementById('status-snap');
+    const pointer = appState.lastPointer;
+    if (pointer) {
+      coordEl.textContent = `${formatNumber(pointer.x, 1)}, ${formatNumber(pointer.y, 1)}`;
+    }
+    zoomEl.textContent = `${Math.round(appState.viewport.zoom * 100)}%`;
+    if (appState.selection.ids.length) {
+      const ann = appState.annotations.find(a => a.id === appState.selection.ids[0]);
+      if (ann?.computed) {
+        if (ann.computed.length) measureEl.textContent = formatMeasurement('length', ann.computed.length, appState.calibration?.scaleUnit);
+        else if (ann.computed.area) measureEl.textContent = formatMeasurement('area', ann.computed.area, appState.calibration?.scaleUnit ? `${appState.calibration.scaleUnit}²` : undefined);
+        else if (ann.computed.angle) measureEl.textContent = formatMeasurement('angle', ann.computed.angle, '°');
+      } else measureEl.textContent = '—';
+    } else measureEl.textContent = '—';
+    snapEl.textContent = `Snap: ${appState.settings.snap.enabled ? 'On' : 'Off'}`;
+  };
+  /* ========================================================
+     Tools & Annotations
+     ======================================================== */
+  const toolButtons = $$('#tool-column .tool-button');
+  let activeTool = 'select';
+  const setActiveTool = (tool) => {
+    activeTool = tool;
+    toolButtons.forEach(btn => btn.setAttribute('aria-pressed', btn.dataset.tool === tool ? 'true' : 'false'));
+  };
+
+  const getActiveLayer = () => appState.layers.find(l => l.id === DEFAULT_LAYER_ID);
+
+  const findLayerContaining = (annotationId, layer = null) => {
+    const layers = layer ? layer.children.map(id => appState.layers.find(l => l.id === id)).filter(Boolean) : appState.layers;
+    for (const lyr of layers) {
+      if (lyr.children.includes(annotationId)) return lyr;
+      const found = findLayerContaining(annotationId, lyr);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const isAnnotationVisible = (id) => {
+    const layer = findLayerContaining(id);
+    if (!layer) return true;
+    return layer.visible;
+  };
+
+  const createAnnotation = (type, geometry, style = {}) => {
+    const annotation = {
+      id: uuid(),
+      type,
+      geometry,
+      style: {
+        stroke: '#ff4081',
+        fill: 'rgba(255,64,129,0.2)',
+        strokeWidth: appState.settings.theme.strokePx,
+        ...style
+      },
+      label: `${type} ${appState.annotations.length + 1}`,
+      computed: {}
+    };
+    annotation.computed = computeAnnotationMeasurements(annotation) || {};
+    appState.annotations.push(annotation);
+    const layer = getActiveLayer();
+    if (layer) layer.children.push(annotation.id);
+    selectAnnotation(annotation.id);
+    pushHistory(`create-${type}`);
+    refreshLayersPanel();
+    refreshAnnotationsPanel();
+    scheduleRedraw();
+  };
+
+  const updateAnnotationGeometry = (id, geometry) => {
+    const annotation = appState.annotations.find(a => a.id === id);
+    if (!annotation) return;
+    annotation.geometry = geometry;
+    annotation.computed = computeAnnotationMeasurements(annotation) || {};
+    appState.selection.bbox = computeBoundingBox(annotation);
+    pushHistory(`update-${annotation.type}`);
+    scheduleRedraw();
+    refreshAnnotationsPanel();
+  };
+
+  const deleteSelection = () => {
+    if (!appState.selection.ids.length) return;
+    const ids = new Set(appState.selection.ids);
+    appState.annotations = appState.annotations.filter(a => !ids.has(a.id));
+    for (const layer of appState.layers) {
+      layer.children = layer.children.filter(id => !ids.has(id));
+    }
+    appState.selection = { ids: [], bbox: null };
+    pushHistory('delete');
+    refreshLayersPanel();
+    refreshAnnotationsPanel();
+    scheduleRedraw();
+  };
+
+  const selectAnnotation = (id) => {
+    if (!id) {
+      appState.selection.ids = [];
+      appState.selection.bbox = null;
+      refreshPropertiesPanel(null);
+      scheduleRedraw();
+      return;
+    }
+    appState.selection.ids = [id];
+    const annotation = appState.annotations.find(a => a.id === id);
+    if (annotation) {
+      appState.selection.bbox = computeBoundingBox(annotation);
+      refreshPropertiesPanel(annotation);
+    }
+    scheduleRedraw();
+    refreshAnnotationsPanel();
+  };
+  /* ========================================================
+     Layers & Properties UI
+     ======================================================== */
+  const refreshLayersPanel = () => {
+    const list = document.getElementById('layer-list');
+    list.innerHTML = '';
+    const renderLayer = (layer, depth = 0) => {
+      const li = document.createElement('li');
+      li.style.paddingLeft = `${depth * 16}px`;
+      li.dataset.id = layer.id;
+      const name = document.createElement('span');
+      name.textContent = layer.name;
+      const controls = document.createElement('span');
+      controls.className = 'layer-controls';
+      const vis = document.createElement('button');
+      vis.type = 'button';
+      vis.textContent = layer.visible ? '👁' : '🚫';
+      vis.addEventListener('click', () => {
+        layer.visible = !layer.visible;
+        refreshLayersPanel();
+        scheduleRedraw();
+      });
+      const lock = document.createElement('button');
+      lock.type = 'button';
+      lock.textContent = layer.locked ? '🔒' : '🔓';
+      lock.addEventListener('click', () => {
+        layer.locked = !layer.locked;
+        refreshLayersPanel();
+      });
+      controls.append(vis, lock);
+      li.append(name, controls);
+      list.appendChild(li);
+      for (const child of layer.children) {
+        const childLayer = appState.layers.find(l => l.id === child);
+        if (childLayer) renderLayer(childLayer, depth + 1);
+      }
+    };
+    appState.layers.forEach(layer => renderLayer(layer));
+  };
+
+  const refreshPropertiesPanel = (annotation) => {
+    const form = document.getElementById('properties-form');
+    form.innerHTML = '';
+    if (!annotation) {
+      const p = document.createElement('p');
+      p.style.gridColumn = 'span 2';
+      p.textContent = 'No selection.';
+      form.appendChild(p);
+      return;
+    }
+    const createField = (label, name, value, type = 'text') => {
+      const wrapper = document.createElement('label');
+      wrapper.textContent = label;
+      const input = document.createElement('input');
+      input.type = type;
+      input.name = name;
+      input.value = value;
+      input.addEventListener('change', () => {
+        annotation.style[name] = type === 'number' ? parseFloat(input.value) : input.value;
+        scheduleRedraw();
+      });
+      wrapper.appendChild(input);
+      form.appendChild(wrapper);
+    };
+    createField('Stroke', 'stroke', annotation.style.stroke);
+    createField('Fill', 'fill', annotation.style.fill);
+    createField('Stroke Width', 'strokeWidth', annotation.style.strokeWidth, 'number');
+    if (annotation.type === 'text') {
+      const addGeometryField = (label, name, value, type = 'text') => {
+        const wrapper = document.createElement('label');
+        wrapper.textContent = label;
+        const input = document.createElement('input');
+        input.type = type;
+        input.value = value;
+        input.addEventListener('change', () => {
+          annotation.geometry[name] = type === 'number' ? parseFloat(input.value) : input.value;
+          scheduleRedraw();
+        });
+        wrapper.appendChild(input);
+        form.appendChild(wrapper);
+      };
+      addGeometryField('Font Size', 'fontSize', annotation.geometry.fontSize || 18, 'number');
+      addGeometryField('Font Weight', 'fontWeight', annotation.geometry.fontWeight || 400, 'number');
+      addGeometryField('Font Color', 'color', annotation.geometry.color || '#ffffff');
+      addGeometryField('Background', 'background', annotation.geometry.background || '');
+    }
+  };
+
+  const refreshAnnotationsPanel = () => {
+    const list = document.getElementById('annotation-list');
+    const filter = document.getElementById('annotation-filter').value;
+    list.innerHTML = '';
+    for (const ann of appState.annotations) {
+      if (filter !== 'all' && ann.type !== filter) continue;
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = ann.label || ann.type;
+      btn.addEventListener('click', () => selectAnnotation(ann.id));
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '✕';
+      del.addEventListener('click', () => {
+        appState.annotations = appState.annotations.filter(a => a.id !== ann.id);
+        for (const layer of appState.layers) layer.children = layer.children.filter(id => id !== ann.id);
+        refreshAnnotationsPanel();
+        scheduleRedraw();
+      });
+      li.append(btn, del);
+      list.appendChild(li);
+    }
+  };
+
+  const refreshUI = () => {
+    refreshLayersPanel();
+    refreshAnnotationsPanel();
+    if (appState.selection.ids.length) {
+      const ann = appState.annotations.find(a => a.id === appState.selection.ids[0]);
+      refreshPropertiesPanel(ann);
+    } else {
+      refreshPropertiesPanel(null);
+    }
+    document.getElementById('toggle-snap').setAttribute('aria-pressed', appState.settings.snap.enabled ? 'true' : 'false');
+    document.getElementById('toggle-snap').textContent = `Snap: ${appState.settings.snap.enabled ? 'On' : 'Off'}`;
+    document.getElementById('toggle-grid').setAttribute('aria-pressed', appState.perspectiveGrid.visible ? 'true' : 'false');
+  };
+  /* ========================================================
+     Persistence & Export
+     ======================================================== */
+  const exportProject = (includeImage = false) => {
+    const data = {
+      schemaVersion: SCHEMA_VERSION,
+      timestamp: Date.now(),
+      image: includeImage ? appState.image : { width: appState.image?.width, height: appState.image?.height },
+      viewport: appState.viewport,
+      settings: appState.settings,
+      calibration: appState.calibration,
+      vanishingPoints: appState.vanishingPoints,
+      perspectiveGrid: appState.perspectiveGrid,
+      guides: appState.guides,
+      layers: appState.layers,
+      annotations: appState.annotations
+    };
+    return data;
+  };
+
+  const importProject = (data, opts = { pushHistory: true, notify: false }) => {
+    if (!data) return;
+    if (data.schemaVersion && data.schemaVersion !== SCHEMA_VERSION) {
+      showToast('Project schema mismatch. Attempting migration…');
+    }
+    appState.image = data.image || null;
+    appState.viewport = data.viewport || appState.viewport;
+    appState.settings = data.settings || appState.settings;
+    appState.calibration = data.calibration || null;
+    appState.vanishingPoints = data.vanishingPoints || [];
+    appState.perspectiveGrid = data.perspectiveGrid || appState.perspectiveGrid;
+    appState.guides = data.guides || [];
+    appState.layers = data.layers || appState.layers;
+    appState.annotations = data.annotations || [];
+    appState.selection = { ids: [], bbox: null };
+    if (opts.pushHistory) pushHistory('import');
+    refreshUI();
+    scheduleRedraw();
+    if (opts.notify) showToast('Project imported');
+  };
+
+  const exportPNG = () => {
+    if (!appState.image?.element) {
+      showToast('Load an image before exporting.');
+      return;
+    }
+    const { width, height } = appState.image;
+    const offscreen = document.createElement('canvas');
+    offscreen.width = width;
+    offscreen.height = height;
+    const offctx = offscreen.getContext('2d');
+    offctx.drawImage(appState.image.element, 0, 0, width, height);
+    for (const ann of appState.annotations) {
+      const layer = findLayerContaining(ann.id);
+      if (layer && !layer.visible) continue;
+      offctx.save();
+      offctx.lineWidth = ann.style.strokeWidth;
+      offctx.strokeStyle = ann.style.stroke;
+      offctx.fillStyle = ann.style.fill;
+      switch (ann.type) {
+        case 'line': {
+          const [a, b] = ann.geometry.points;
+          offctx.beginPath();
+          offctx.moveTo(a.x, a.y);
+          offctx.lineTo(b.x, b.y);
+          offctx.stroke();
+          break;
+        }
+        case 'polyline': {
+          offctx.beginPath();
+          ann.geometry.points.forEach((p, i) => i === 0 ? offctx.moveTo(p.x, p.y) : offctx.lineTo(p.x, p.y));
+          offctx.stroke();
+          break;
+        }
+        case 'rect': {
+          const { x, y, width, height } = ann.geometry;
+          offctx.fillRect(x, y, width, height);
+          offctx.strokeRect(x, y, width, height);
+          break;
+        }
+        case 'ellipse': {
+          const { cx, cy, rx, ry } = ann.geometry;
+          offctx.beginPath();
+          offctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+          offctx.fill();
+          offctx.stroke();
+          break;
+        }
+        case 'polygon': {
+          ann.geometry.rings.forEach((ring, idx) => {
+            offctx.beginPath();
+            ring.forEach((p, i) => i === 0 ? offctx.moveTo(p.x, p.y) : offctx.lineTo(p.x, p.y));
+            offctx.closePath();
+            if (idx === 0) offctx.fill('evenodd');
+            offctx.stroke();
+          });
+          break;
+        }
+        case 'triangle': {
+          const pts = ann.geometry.points;
+          offctx.beginPath();
+          pts.forEach((p, i) => i === 0 ? offctx.moveTo(p.x, p.y) : offctx.lineTo(p.x, p.y));
+          offctx.closePath();
+          offctx.fill();
+          offctx.stroke();
+          break;
+        }
+        case 'angle': {
+          const { a, b, c } = ann.geometry;
+          offctx.beginPath();
+          offctx.moveTo(b.x, b.y);
+          offctx.lineTo(a.x, a.y);
+          offctx.moveTo(b.x, b.y);
+          offctx.lineTo(c.x, c.y);
+          offctx.stroke();
+          break;
+        }
+        case 'text': {
+          const { x, y, text, fontSize, fontFamily, fontWeight, color, background } = ann.geometry;
+          offctx.font = `${fontWeight || 400} ${(fontSize || 18)}px ${fontFamily || 'Inter, sans-serif'}`;
+          offctx.fillStyle = color || '#ffffff';
+          if (background) {
+            const metrics = offctx.measureText(text);
+            const pad = 4;
+            const width = metrics.width + pad * 2;
+            const height = (fontSize || 18) + pad * 2;
+            offctx.fillStyle = background;
+            offctx.fillRect(x - pad, y - (fontSize || 18) - pad, width, height);
+            offctx.fillStyle = color || '#ffffff';
+          }
+          offctx.fillText(text, x, y);
+          break;
+        }
+      }
+      offctx.restore();
+    }
+    offscreen.toBlob(blob => {
+      if (!blob) {
+        showToast('Export failed');
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'annotated.png';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('PNG export ready');
+    });
+  };
+  /* ========================================================
+     UI & Events
+     ======================================================== */
+  const imageLoader = document.getElementById('image-loader');
+  const projectLoader = document.getElementById('project-loader');
+
+  const openImagePicker = () => imageLoader.click();
+  const openProjectPicker = () => projectLoader.click();
+
+  const applyExifOrientation = async (file) => {
+    const buffer = await file.arrayBuffer();
+    let orientation = 1;
+    try {
+      const view = new DataView(buffer);
+      if (view.getUint16(0, false) !== 0xFFD8) throw new Error('Not JPEG');
+      let offset = 2;
+      while (offset < view.byteLength) {
+        const marker = view.getUint16(offset, false);
+        offset += 2;
+        if (marker === 0xFFE1) {
+          const size = view.getUint16(offset, false);
+          offset += 2;
+          if (view.getUint32(offset, false) !== 0x45786966) break;
+          const little = view.getUint16(offset + 6, false) === 0x4949;
+          let dirOffset = view.getUint32(offset + 10, little);
+          if (dirOffset < 0x00000008) break;
+          const entries = view.getUint16(offset + 6 + dirOffset, little);
+          for (let i = 0; i < entries; i++) {
+            const entryOffset = offset + 8 + dirOffset + i * 12;
+            if (view.getUint16(entryOffset, little) === 0x0112) {
+              orientation = view.getUint16(entryOffset + 8, little);
+              break;
+            }
+          }
+          break;
+        } else if (marker === 0xFFDA) {
+          break;
+        } else {
+          offset += view.getUint16(offset, false);
+        }
+      }
+    } catch (err) {
+      console.warn('EXIF parse failed', err);
+    }
+    const blob = new Blob([buffer], { type: file.type });
+    const imageURL = URL.createObjectURL(blob);
+    const image = new Image();
+    image.src = imageURL;
+    await image.decode();
+    const canvasTmp = document.createElement('canvas');
+    const ctxTmp = canvasTmp.getContext('2d');
+    const { width, height } = image;
+    if (orientation > 4) {
+      canvasTmp.width = height;
+      canvasTmp.height = width;
+    } else {
+      canvasTmp.width = width;
+      canvasTmp.height = height;
+    }
+    ctxTmp.save();
+    switch (orientation) {
+      case 2: ctxTmp.scale(-1, 1); ctxTmp.translate(-width, 0); break;
+      case 3: ctxTmp.translate(width, height); ctxTmp.rotate(Math.PI); break;
+      case 4: ctxTmp.scale(1, -1); ctxTmp.translate(0, -height); break;
+      case 5: ctxTmp.rotate(0.5 * Math.PI); ctxTmp.scale(1, -1); break;
+      case 6: ctxTmp.rotate(0.5 * Math.PI); ctxTmp.translate(0, -height); break;
+      case 7: ctxTmp.rotate(0.5 * Math.PI); ctxTmp.translate(width, -height); ctxTmp.scale(-1, 1); break;
+      case 8: ctxTmp.rotate(-0.5 * Math.PI); ctxTmp.translate(-height, 0); break;
+      default: break;
+    }
+    ctxTmp.drawImage(image, 0, 0);
+    ctxTmp.restore();
+    const oriented = new Image();
+    oriented.src = canvasTmp.toDataURL(file.type);
+    await oriented.decode();
+    URL.revokeObjectURL(imageURL);
+    return oriented;
+  };
+
+  const loadImageFile = async (file) => {
+    const img = await applyExifOrientation(file);
+    appState.image = {
+      src: img.src,
+      width: img.width,
+      height: img.height,
+      exifRotation: 0,
+      element: img
+    };
+    fitToView();
+    pushHistory('load-image');
+    scheduleRedraw();
+  };
+
+  const fitToView = () => {
+    if (!appState.image) return;
+    const { width, height } = appState.viewport.viewSize;
+    const scale = Math.min(width / appState.image.width, height / appState.image.height);
+    appState.viewport.zoom = scale;
+    appState.viewport.pan = { x: (width - appState.image.width * scale) / 2, y: (height - appState.image.height * scale) / 2 };
+    scheduleRedraw();
+  };
+
+  const setZoom = (zoom, origin) => {
+    const { pan } = appState.viewport;
+    const oldZoom = appState.viewport.zoom;
+    const factor = zoom / oldZoom;
+    if (origin) {
+      pan.x = origin.x - (origin.x - pan.x) * factor;
+      pan.y = origin.y - (origin.y - pan.y) * factor;
+    }
+    appState.viewport.zoom = zoom;
+    scheduleRedraw();
+  };
+
+  const zoomAroundPoint = (delta, clientX, clientY) => {
+    const zoom = appState.viewport.zoom * (delta > 0 ? 0.9 : 1.1);
+    const clamped = clamp(zoom, 0.05, 10);
+    setZoom(clamped, { x: clientX, y: clientY });
+  };
+
+  const panCanvas = (dx, dy) => {
+    appState.viewport.pan.x += dx;
+    appState.viewport.pan.y += dy;
+    scheduleRedraw();
+  };
+
+  const handlePointerDown = (event) => {
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    appState.lastPointer = point;
+    if (activeTool === 'line') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      appState.pendingAction = { tool: 'line', start: { x: snapped.x, y: snapped.y }, temp: { x: snapped.x, y: snapped.y } };
+    } else if (activeTool === 'rect') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      appState.pendingAction = { tool: 'rect', start: { x: snapped.x, y: snapped.y }, temp: { x: snapped.x, y: snapped.y } };
+    } else if (activeTool === 'ellipse') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      appState.pendingAction = { tool: 'ellipse', start: { x: snapped.x, y: snapped.y }, temp: { x: snapped.x, y: snapped.y } };
+    } else if (activeTool === 'point') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      createAnnotation('point', { x: snapped.x, y: snapped.y });
+    } else if (activeTool === 'pan' || event.button === 1) {
+      appState.pendingAction = { tool: 'pan', start: { x: event.clientX, y: event.clientY } };
+    }
+  };
+
+  const handlePointerMove = (event) => {
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    appState.lastPointer = point;
+    const action = appState.pendingAction;
+    if (!action) return;
+    if (action.tool === 'line') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      action.temp = { x: snapped.x, y: snapped.y };
+      scheduleRedraw();
+    } else if (action.tool === 'rect' || action.tool === 'ellipse') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      action.temp = { x: snapped.x, y: snapped.y };
+      scheduleRedraw();
+    } else if (action.tool === 'pan') {
+      const dx = event.clientX - action.start.x;
+      const dy = event.clientY - action.start.y;
+      panCanvas(dx, dy);
+      action.start = { x: event.clientX, y: event.clientY };
+    }
+  };
+
+  const handlePointerUp = (event) => {
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    const action = appState.pendingAction;
+    if (!action) return;
+    if (action.tool === 'line') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      if (dist(action.start.x, action.start.y, snapped.x, snapped.y) > 0.5) {
+        createAnnotation('line', { points: [action.start, { x: snapped.x, y: snapped.y }] });
+      }
+    } else if (action.tool === 'rect') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      const width = snapped.x - action.start.x;
+      const height = snapped.y - action.start.y;
+      if (Math.abs(width) > 0.5 && Math.abs(height) > 0.5) {
+        createAnnotation('rect', { x: action.start.x, y: action.start.y, width, height });
+      }
+    } else if (action.tool === 'ellipse') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      const rx = Math.abs(snapped.x - action.start.x) / 2;
+      const ry = Math.abs(snapped.y - action.start.y) / 2;
+      if (rx > 0.5 && ry > 0.5) {
+        const cx = (action.start.x + snapped.x) / 2;
+        const cy = (action.start.y + snapped.y) / 2;
+        createAnnotation('ellipse', { cx, cy, rx, ry });
+      }
+    }
+    appState.pendingAction = null;
+  };
+
+  const handleWheel = (event) => {
+    if (event.ctrlKey) {
+      event.preventDefault();
+      zoomAroundPoint(event.deltaY, event.clientX, event.clientY);
+    } else if (event.shiftKey) {
+      panCanvas(-event.deltaY, 0);
+    } else {
+      panCanvas(-event.deltaX, -event.deltaY);
+    }
+  };
+
+  const handleKeyDown = (event) => {
+    switch (event.key) {
+      case '1': setActiveTool('select'); break;
+      case '2': setActiveTool('pan'); break;
+      case '3': setActiveTool('line'); break;
+      case '5': setActiveTool('rect'); break;
+      case '6': setActiveTool('ellipse'); break;
+      case '7': setActiveTool('polygon'); break;
+      case '8': setActiveTool('angle'); break;
+      case '9': setActiveTool('triangle'); break;
+      case '0': setActiveTool('text'); break;
+      case 'Delete': deleteSelection(); break;
+      case 'Escape': selectAnnotation(null); break;
+    }
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      undo();
+    }
+    if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      redo();
+    }
+  };
+
+  const setupMenus = () => {
+    document.querySelectorAll('.menu').forEach(menu => {
+      const button = menu.querySelector('button');
+      const list = menu.querySelector('.menu-list');
+      button.addEventListener('click', () => {
+        const expanded = menu.getAttribute('aria-expanded') === 'true';
+        closeAllMenus();
+        menu.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      });
+      menu.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+          menu.setAttribute('aria-expanded', 'false');
+          button.focus();
+        }
+      });
+      list.querySelectorAll('button').forEach(item => {
+        item.addEventListener('click', handleMenuAction);
+      });
+    });
+    document.addEventListener('click', event => {
+      if (!event.target.closest('.menu')) closeAllMenus();
+    });
+  };
+
+  const closeAllMenus = () => {
+    document.querySelectorAll('.menu').forEach(menu => menu.setAttribute('aria-expanded', 'false'));
+  };
+
+  const handleMenuAction = (event) => {
+    const action = event.currentTarget.dataset.action;
+    switch (action) {
+      case 'open-image': confirmDiscardChanges().then(ok => ok && openImagePicker()); break;
+      case 'import-project': confirmDiscardChanges().then(ok => ok && openProjectPicker()); break;
+      case 'save-project': saveProject(); break;
+      case 'export-png': exportPNG(); break;
+      case 'export-svg': showToast('SVG export not implemented in this build'); break;
+      case 'view-fit': fitToView(); break;
+      case 'view-100': setZoom(1, appState.viewport.pan); break;
+      case 'view-actual': setZoom(appState.image ? appState.image.width / appState.viewport.viewSize.width : 1, appState.viewport.pan); break;
+      case 'units-metric': appState.settings.units = 'metric'; scheduleRedraw(); break;
+      case 'units-imperial': appState.settings.units = 'imperial'; scheduleRedraw(); break;
+      case 'settings-theme': toggleColorBlindPalette(); break;
+      case 'settings-ui-scale': adjustUiScale(); break;
+      case 'settings-stroke': adjustStrokeThickness(); break;
+      case 'help-cheatsheet': toggleCheatsheet(true); break;
+      case 'help-about': showToast('Image Annotator – Offline tool for perspective-aware markup'); break;
+    }
+    closeAllMenus();
+  };
+
+  const toggleColorBlindPalette = () => {
+    const useCvd = !appState.settings.theme.colorBlind;
+    appState.settings.theme.colorBlind = useCvd;
+    appState.settings.theme.axisColors = useCvd ? { ...GRID_COLORS_CVD } : { ...GRID_COLORS };
+    scheduleRedraw();
+  };
+
+  const adjustUiScale = () => {
+    const value = parseFloat(window.prompt('UI scale (0.5 – 2.0)', appState.settings.theme.uiScale));
+    if (!Number.isFinite(value)) return;
+    appState.settings.theme.uiScale = clamp(value, 0.5, 2);
+    document.documentElement.style.setProperty('font-size', `${14 * appState.settings.theme.uiScale}px`);
+  };
+
+  const adjustStrokeThickness = () => {
+    const value = parseFloat(window.prompt('Stroke thickness (px)', appState.settings.theme.strokePx));
+    if (!Number.isFinite(value)) return;
+    appState.settings.theme.strokePx = clamp(value, 0.2, 20);
+    scheduleRedraw();
+  };
+
+  const toggleCheatsheet = (show) => {
+    const panel = document.getElementById('cheatsheet');
+    panel.style.display = show ? 'flex' : 'none';
+  };
+
+  const saveProject = () => {
+    const data = exportProject(false);
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'image-annotator-project.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Project JSON downloaded');
+    updateDirtyFlag(false);
+  };
+
+  imageLoader.addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    await loadImageFile(file);
+    event.target.value = '';
+  });
+
+  projectLoader.addEventListener('change', async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    importProject(JSON.parse(text), { pushHistory: true, notify: true });
+    event.target.value = '';
+  });
+
+  document.getElementById('toggle-snap').addEventListener('click', () => {
+    appState.settings.snap.enabled = !appState.settings.snap.enabled;
+    refreshUI();
+    scheduleRedraw();
+  });
+
+  document.getElementById('toggle-grid').addEventListener('click', () => {
+    appState.perspectiveGrid.visible = !appState.perspectiveGrid.visible;
+    refreshUI();
+    scheduleRedraw();
+  });
+
+  $$('#tool-column .tool-button').forEach(btn => {
+    btn.addEventListener('click', () => setActiveTool(btn.dataset.tool));
+  });
+
+  document.getElementById('canvas-wrapper').addEventListener('pointerdown', handlePointerDown);
+  document.getElementById('canvas-wrapper').addEventListener('pointermove', handlePointerMove);
+  document.getElementById('canvas-wrapper').addEventListener('pointerup', handlePointerUp);
+  document.getElementById('canvas-wrapper').addEventListener('wheel', handleWheel, { passive: false });
+
+  document.addEventListener('keydown', handleKeyDown);
+  document.querySelector('[data-action="close-cheatsheet"]').addEventListener('click', () => toggleCheatsheet(false));
+
+  const dragOverlay = document.getElementById('drag-overlay');
+  const showDragOverlay = (show) => {
+    dragOverlay.style.display = show ? 'flex' : 'none';
+  };
+
+  window.addEventListener('dragover', event => {
+    event.preventDefault();
+    showDragOverlay(true);
+  });
+
+  window.addEventListener('dragleave', event => {
+    if (!event.relatedTarget) showDragOverlay(false);
+  });
+
+  window.addEventListener('drop', async (event) => {
+    event.preventDefault();
+    showDragOverlay(false);
+    const file = event.dataTransfer?.files?.[0];
+    if (!file) return;
+    if (file.type.startsWith('image/')) {
+      await loadImageFile(file);
+    } else if (file.type === 'application/json') {
+      const text = await file.text();
+      importProject(JSON.parse(text), { pushHistory: true, notify: true });
+    }
+  });
+
+  window.addEventListener('resize', fitCanvasToContainer);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') autosave();
+  });
+
+  const boot = () => {
+    setupMenus();
+    fitCanvasToContainer();
+    refreshUI();
+    startAutosave();
+    loadAutosave();
+    scheduleRedraw();
+  };
+
+  return { boot };
+})();
+
+window.addEventListener('DOMContentLoaded', () => App.boot());
+</script>
+</body>
+</html>
