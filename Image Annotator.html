@@ -727,6 +727,7 @@ const App = (() => {
   const radToDeg = r => r * 180 / Math.PI;
   const degToRad = d => d * Math.PI / 180;
   const dist = (ax, ay, bx, by) => Math.hypot(bx - ax, by - ay);
+  const clonePoint = (p) => ({ x: p.x, y: p.y });
   const uuid = (() => {
     let counter = 0;
     return () => `id-${Date.now().toString(36)}-${(counter++).toString(36)}`;
@@ -803,6 +804,16 @@ const App = (() => {
     }
     if (!best) return { x, y, snapped: false };
     return { x: best.x ?? x, y: best.y ?? y, snapped: true, target: best };
+  };
+  const parseCalibrationInput = (value) => {
+    if (!value) return null;
+    const match = value.trim().match(/^(-?\d*\.?\d+)\s*(mm|cm|m|in|ft)?$/i);
+    if (!match) return null;
+    const amount = parseFloat(match[1]);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    const unit = (match[2] || (appState.settings.units === 'imperial' ? 'in' : 'cm')).toLowerCase();
+    if (!['mm', 'cm', 'm', 'in', 'ft'].includes(unit)) return null;
+    return { amount, unit };
   };
   const cloneState = () => JSON.parse(JSON.stringify({
     schemaVersion: appState.schemaVersion,
@@ -1072,6 +1083,7 @@ const App = (() => {
       ctx.fillRect(-10000, -10000, 20000, 20000);
     }
     renderPerspectiveGrid(ctx);
+    renderVanishingPoints(ctx);
     renderAnnotations(ctx);
     if (appState.pendingAction && appState.pendingAction.tool) {
       renderPendingAction(ctx, appState.pendingAction);
@@ -1108,6 +1120,27 @@ const App = (() => {
     context.restore();
   };
 
+  const renderVanishingPoints = (context) => {
+    if (!appState.vanishingPoints.length) return;
+    context.save();
+    const size = 10 / appState.viewport.zoom;
+    context.lineWidth = 2 / appState.viewport.zoom;
+    for (const vp of appState.vanishingPoints) {
+      const color = appState.settings.theme.axisColors[vp.role] || '#ffffff';
+      context.strokeStyle = color;
+      context.beginPath();
+      context.moveTo(vp.x - size, vp.y - size);
+      context.lineTo(vp.x + size, vp.y + size);
+      context.moveTo(vp.x - size, vp.y + size);
+      context.lineTo(vp.x + size, vp.y - size);
+      context.stroke();
+      context.beginPath();
+      context.arc(vp.x, vp.y, size * 0.6, 0, Math.PI * 2);
+      context.stroke();
+    }
+    context.restore();
+  };
+
   const renderPendingAction = (context, action) => {
     context.save();
     context.lineWidth = 1 / appState.viewport.zoom;
@@ -1128,6 +1161,46 @@ const App = (() => {
       const cy = (action.start.y + action.temp.y) / 2;
       context.beginPath();
       context.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      context.stroke();
+    } else if (action.tool === 'polyline') {
+      const pts = action.points || [];
+      if (pts.length) {
+        context.beginPath();
+        context.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) context.lineTo(pts[i].x, pts[i].y);
+        if (action.temp) context.lineTo(action.temp.x, action.temp.y);
+        context.stroke();
+      }
+    } else if (action.tool === 'polygon' || action.tool === 'triangle') {
+      const pts = action.points || [];
+      if (pts.length) {
+        context.beginPath();
+        context.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) context.lineTo(pts[i].x, pts[i].y);
+        if (action.temp) context.lineTo(action.temp.x, action.temp.y);
+        context.closePath();
+        context.stroke();
+      }
+    } else if (action.tool === 'angle') {
+      const pts = action.points || [];
+      if (pts.length) {
+        const origin = pts[1] || pts[0];
+        context.beginPath();
+        if (pts[0]) {
+          context.moveTo(origin.x, origin.y);
+          context.lineTo(pts[0].x, pts[0].y);
+        }
+        const tail = pts[2] || action.temp;
+        if (tail) {
+          context.moveTo(origin.x, origin.y);
+          context.lineTo(tail.x, tail.y);
+        }
+        context.stroke();
+      }
+    } else if (action.tool === 'calibrate' && action.start && action.temp) {
+      context.beginPath();
+      context.moveTo(action.start.x, action.start.y);
+      context.lineTo(action.temp.x, action.temp.y);
       context.stroke();
     }
     context.restore();
@@ -1294,6 +1367,10 @@ const App = (() => {
   const setActiveTool = (tool) => {
     activeTool = tool;
     toolButtons.forEach(btn => btn.setAttribute('aria-pressed', btn.dataset.tool === tool ? 'true' : 'false'));
+    if (appState.pendingAction && appState.pendingAction.tool !== tool) {
+      appState.pendingAction = null;
+      scheduleRedraw();
+    }
   };
 
   const getActiveLayer = () => appState.layers.find(l => l.id === DEFAULT_LAYER_ID);
@@ -1786,20 +1863,174 @@ const App = (() => {
   const handlePointerDown = (event) => {
     const point = toCanvasCoords(event.clientX, event.clientY);
     appState.lastPointer = point;
-    if (activeTool === 'line') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      appState.pendingAction = { tool: 'line', start: { x: snapped.x, y: snapped.y }, temp: { x: snapped.x, y: snapped.y } };
-    } else if (activeTool === 'rect') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      appState.pendingAction = { tool: 'rect', start: { x: snapped.x, y: snapped.y }, temp: { x: snapped.x, y: snapped.y } };
-    } else if (activeTool === 'ellipse') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      appState.pendingAction = { tool: 'ellipse', start: { x: snapped.x, y: snapped.y }, temp: { x: snapped.x, y: snapped.y } };
-    } else if (activeTool === 'point') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      createAnnotation('point', { x: snapped.x, y: snapped.y });
-    } else if (activeTool === 'pan' || event.button === 1) {
-      appState.pendingAction = { tool: 'pan', start: { x: event.clientX, y: event.clientY } };
+    const disableSnap = event.ctrlKey || event.metaKey;
+    const snapped = snapPoint(point.x, point.y, { disableSnap });
+    switch (activeTool) {
+      case 'line':
+        appState.pendingAction = { tool: 'line', start: clonePoint(snapped), temp: clonePoint(snapped) };
+        scheduleRedraw();
+        break;
+      case 'rect':
+        appState.pendingAction = { tool: 'rect', start: clonePoint(snapped), temp: clonePoint(snapped) };
+        scheduleRedraw();
+        break;
+      case 'ellipse':
+        appState.pendingAction = { tool: 'ellipse', start: clonePoint(snapped), temp: clonePoint(snapped) };
+        scheduleRedraw();
+        break;
+      case 'point':
+        createAnnotation('point', { x: snapped.x, y: snapped.y });
+        break;
+      case 'polyline': {
+        let action = appState.pendingAction;
+        if (!action || action.tool !== 'polyline') {
+          action = { tool: 'polyline', points: [clonePoint(snapped)], temp: clonePoint(snapped), handlesPointerUp: false };
+          appState.pendingAction = action;
+        } else {
+          const last = action.points[action.points.length - 1];
+          if (dist(last.x, last.y, snapped.x, snapped.y) > 0.5) {
+            action.points.push(clonePoint(snapped));
+          }
+          action.temp = clonePoint(snapped);
+        }
+        if (event.detail > 1 && action.points.length >= 2) {
+          createAnnotation('polyline', { points: action.points.map(clonePoint) });
+          appState.pendingAction = null;
+        }
+        scheduleRedraw();
+        break;
+      }
+      case 'polygon': {
+        let action = appState.pendingAction;
+        if (!action || action.tool !== 'polygon') {
+          action = { tool: 'polygon', points: [clonePoint(snapped)], temp: clonePoint(snapped), handlesPointerUp: false };
+          appState.pendingAction = action;
+        } else {
+          const last = action.points[action.points.length - 1];
+          if (dist(last.x, last.y, snapped.x, snapped.y) > 0.5) {
+            action.points.push(clonePoint(snapped));
+          }
+          action.temp = clonePoint(snapped);
+        }
+        const first = appState.pendingAction?.points?.[0];
+        const closeThreshold = 8 / appState.viewport.zoom;
+        if ((event.detail > 1 || (first && dist(first.x, first.y, snapped.x, snapped.y) <= closeThreshold)) && appState.pendingAction.points.length >= 3) {
+          const ring = appState.pendingAction.points.map(clonePoint);
+          if (dist(ring[0].x, ring[0].y, ring[ring.length - 1].x, ring[ring.length - 1].y) > 0.01) {
+            ring.push(clonePoint(ring[0]));
+          }
+          createAnnotation('polygon', { rings: [ring] });
+          appState.pendingAction = null;
+        }
+        scheduleRedraw();
+        break;
+      }
+      case 'triangle': {
+        let action = appState.pendingAction;
+        if (!action || action.tool !== 'triangle') {
+          action = { tool: 'triangle', points: [clonePoint(snapped)], temp: clonePoint(snapped), handlesPointerUp: false };
+          appState.pendingAction = action;
+        } else {
+          action.points.push(clonePoint(snapped));
+          action.temp = clonePoint(snapped);
+        }
+        if (appState.pendingAction.points.length === 3) {
+          createAnnotation('triangle', { points: appState.pendingAction.points.map(clonePoint) });
+          appState.pendingAction = null;
+        } else {
+          scheduleRedraw();
+        }
+        break;
+      }
+      case 'angle': {
+        let action = appState.pendingAction;
+        if (!action || action.tool !== 'angle') {
+          action = { tool: 'angle', points: [clonePoint(snapped)], temp: clonePoint(snapped), handlesPointerUp: false };
+          appState.pendingAction = action;
+        } else {
+          action.points.push(clonePoint(snapped));
+          action.temp = clonePoint(snapped);
+        }
+        if (appState.pendingAction.points.length === 3) {
+          const [a, b, c] = appState.pendingAction.points.map(clonePoint);
+          createAnnotation('angle', { a, b, c });
+          appState.pendingAction = null;
+        } else {
+          scheduleRedraw();
+        }
+        break;
+      }
+      case 'text': {
+        const value = window.prompt('Enter text');
+        if (value) {
+          createAnnotation('text', { x: snapped.x, y: snapped.y, text: value, fontSize: 24, fontFamily: 'Inter, sans-serif', fontWeight: 600, color: '#ffffff', background: 'rgba(0,0,0,0.5)' });
+        }
+        break;
+      }
+      case 'calibrate': {
+        let action = appState.pendingAction;
+        if (!action || action.tool !== 'calibrate') {
+          appState.pendingAction = { tool: 'calibrate', start: clonePoint(snapped), temp: clonePoint(snapped), handlesPointerUp: false };
+          scheduleRedraw();
+        } else {
+          const distancePx = dist(action.start.x, action.start.y, snapped.x, snapped.y);
+          if (distancePx < 1) {
+            showToast('Calibration distance too small');
+            appState.pendingAction = null;
+            scheduleRedraw();
+            break;
+          }
+          const input = window.prompt('Enter real-world distance with unit (e.g. 2.5 m or 8 in)', `${formatNumber(distancePx, 2)} ${appState.settings.units === 'imperial' ? 'in' : 'cm'}`);
+          const parsed = parseCalibrationInput(input || '');
+          if (!parsed) {
+            showToast('Calibration cancelled');
+            appState.pendingAction = null;
+            scheduleRedraw();
+            break;
+          }
+          appState.calibration = { scaleRatio: parsed.amount / distancePx, scaleUnit: parsed.unit };
+          showToast(`Calibrated: 1px = ${formatNumber(appState.calibration.scaleRatio, 4)} ${parsed.unit}`);
+          appState.pendingAction = null;
+          refreshUI();
+          scheduleRedraw();
+        }
+        break;
+      }
+      case 'vanish': {
+        const threshold = 12 / appState.viewport.zoom;
+        let nearest = null;
+        let best = Infinity;
+        for (const vp of appState.vanishingPoints) {
+          const d = dist(vp.x, vp.y, snapped.x, snapped.y);
+          if (d <= threshold && d < best) {
+            nearest = vp;
+            best = d;
+          }
+        }
+        if (nearest) {
+          appState.pendingAction = { tool: 'vanish-drag', id: nearest.id };
+        } else {
+          const roles = ['left', 'right', 'vertical'];
+          const role = roles[appState.vanishingPoints.length % roles.length];
+          const vp = { id: uuid(), x: snapped.x, y: snapped.y, role };
+          appState.vanishingPoints.push(vp);
+          appState.pendingAction = { tool: 'vanish-drag', id: vp.id };
+          showToast(`Vanishing point added (${role})`);
+        }
+        scheduleRedraw();
+        break;
+      }
+      case 'grid':
+        appState.perspectiveGrid.visible = !appState.perspectiveGrid.visible;
+        refreshUI();
+        scheduleRedraw();
+        setActiveTool('select');
+        break;
+      default:
+        if (activeTool === 'pan' || event.button === 1) {
+          appState.pendingAction = { tool: 'pan', start: { x: event.clientX, y: event.clientY } };
+        }
+        break;
     }
   };
 
@@ -1808,14 +2039,22 @@ const App = (() => {
     appState.lastPointer = point;
     const action = appState.pendingAction;
     if (!action) return;
-    if (action.tool === 'line') {
+    if (action.tool === 'line' || action.tool === 'rect' || action.tool === 'ellipse' || action.tool === 'calibrate') {
       const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
       action.temp = { x: snapped.x, y: snapped.y };
       scheduleRedraw();
-    } else if (action.tool === 'rect' || action.tool === 'ellipse') {
+    } else if (action.tool === 'polyline' || action.tool === 'polygon' || action.tool === 'triangle' || action.tool === 'angle') {
       const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
       action.temp = { x: snapped.x, y: snapped.y };
       scheduleRedraw();
+    } else if (action.tool === 'vanish-drag') {
+      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
+      const vp = appState.vanishingPoints.find(v => v.id === action.id);
+      if (vp) {
+        vp.x = snapped.x;
+        vp.y = snapped.y;
+        scheduleRedraw();
+      }
     } else if (action.tool === 'pan') {
       const dx = event.clientX - action.start.x;
       const dy = event.clientY - action.start.y;
@@ -1827,7 +2066,7 @@ const App = (() => {
   const handlePointerUp = (event) => {
     const point = toCanvasCoords(event.clientX, event.clientY);
     const action = appState.pendingAction;
-    if (!action) return;
+    if (!action || action.handlesPointerUp === false) return;
     if (action.tool === 'line') {
       const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
       if (dist(action.start.x, action.start.y, snapped.x, snapped.y) > 0.5) {
