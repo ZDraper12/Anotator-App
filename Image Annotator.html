@@ -924,6 +924,14 @@ textarea:focus-visible {
 
   const ANGLE_SNAP_RADIANS = (15 * Math.PI) / 180;
 
+  function normalizeAngle(angle) {
+    const tau = Math.PI * 2;
+    let result = angle % tau;
+    if (result <= -Math.PI) result += tau;
+    if (result > Math.PI) result -= tau;
+    return result;
+  }
+
   function constrainPointToAngle(anchor, target, step = ANGLE_SNAP_RADIANS) {
     const dx = target.x - anchor.x;
     const dy = target.y - anchor.y;
@@ -934,6 +942,20 @@ textarea:focus-visible {
     return {
       x: anchor.x + Math.cos(snapped) * distance,
       y: anchor.y + Math.sin(snapped) * distance
+    };
+  }
+
+  function constrainAngleSpan(vertex, legPoint, target, step = ANGLE_SNAP_RADIANS) {
+    const distance = Math.hypot(target.x - vertex.x, target.y - vertex.y);
+    if (!distance) return { ...target };
+    const baseAngle = Math.atan2(legPoint.y - vertex.y, legPoint.x - vertex.x);
+    const targetAngle = Math.atan2(target.y - vertex.y, target.x - vertex.x);
+    const delta = normalizeAngle(targetAngle - baseAngle);
+    const snappedDelta = Math.round(delta / step) * step;
+    const snappedAngle = baseAngle + snappedDelta;
+    return {
+      x: vertex.x + Math.cos(snappedAngle) * distance,
+      y: vertex.y + Math.sin(snappedAngle) * distance
     };
   }
 
@@ -1871,6 +1893,7 @@ textarea:focus-visible {
     }
 
     if (appState.pointerMode === 'angle') {
+      handleAnglePointerDown(event, point);
       return;
     }
 
@@ -2330,7 +2353,7 @@ textarea:focus-visible {
       return true;
     }
     if (geom.stage === 2) {
-      geom.c = shift ? constrainPointToAngle(geom.b, point) : { ...point };
+      geom.c = shift ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
       updateMeasurementStatus(angleBetween(geom.a, geom.b, geom.c), 'angle');
       return true;
     }
@@ -2354,10 +2377,27 @@ textarea:focus-visible {
       return;
     }
     if (geom.stage === 2) {
-      geom.c = isShiftPressed(event) ? constrainPointToAngle(geom.b, point) : { ...point };
+      geom.c = isShiftPressed(event) ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
       geom.stage = 3;
       finishDrawing();
     }
+  }
+
+  function handleAnglePointerDown(event, point) {
+    if (!appState.draft || appState.draft.type !== 'angle' || appState.draft.geometry.stage >= 3) {
+      appState.draft = createAngleDraft(point);
+      scheduleRedraw();
+      return;
+    }
+    const geom = appState.draft.geometry;
+    if (geom.stage === 1) {
+      geom.b = isShiftPressed(event) ? constrainPointToAngle(geom.a, point) : { ...point };
+      updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
+    } else if (geom.stage === 2) {
+      geom.c = isShiftPressed(event) ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      updateMeasurementStatus(angleBetween(geom.a, geom.b, geom.c), 'angle');
+    }
+    scheduleRedraw();
   }
 
   function normalizedRect(start, end) {
