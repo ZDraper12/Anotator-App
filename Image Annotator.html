@@ -575,6 +575,47 @@ textarea:focus-visible {
   const TOOL_ORDER = ['select', 'pan', 'point', 'line', 'polyline', 'rect', 'ellipse', 'polygon', 'angle', 'text', 'triangle', 'calibrate'];
   const PATH_TOOLS = new Set(['polyline', 'polygon']);
   const RULER_SIZE = 24;
+  const DEFAULT_PX_PER_INCH = 96;
+  const UNIT_ALIASES = {
+    mm: 'mm',
+    millimeter: 'mm',
+    millimeters: 'mm',
+    centimetre: 'cm',
+    centimetres: 'cm',
+    centimeter: 'cm',
+    centimeters: 'cm',
+    cm: 'cm',
+    m: 'm',
+    meter: 'm',
+    meters: 'm',
+    metre: 'm',
+    metres: 'm',
+    km: 'km',
+    kilometer: 'km',
+    kilometers: 'km',
+    inch: 'in',
+    inches: 'in',
+    in: 'in',
+    ft: 'ft',
+    foot: 'ft',
+    feet: 'ft',
+    yard: 'yd',
+    yards: 'yd',
+    yd: 'yd',
+    mile: 'mi',
+    miles: 'mi',
+    mi: 'mi'
+  };
+  const UNIT_TO_METERS = {
+    mm: 0.001,
+    cm: 0.01,
+    m: 1,
+    km: 1000,
+    in: 0.0254,
+    ft: 0.3048,
+    yd: 0.9144,
+    mi: 1609.34
+  };
   const TRIANGLE_POINT_LABELS = ['A', 'B', 'C'];
   const TRIANGLE_SIDE_LABELS = ['AB', 'BC', 'CA'];
   const SNAP_DISTANCE = 10; // screen px
@@ -642,6 +683,49 @@ textarea:focus-visible {
       right: { x: 500, y: 0 },
       vertical: { x: 0, y: -500 }
     };
+  }
+
+  function normalizeUnit(unit) {
+    if (!unit) return null;
+    const trimmed = unit.toString().trim().toLowerCase();
+    if (!trimmed) return null;
+    if (UNIT_ALIASES[trimmed]) return UNIT_ALIASES[trimmed];
+    const compact = trimmed.replace(/\s+/g, '');
+    return UNIT_ALIASES[compact] || null;
+  }
+
+  function convertDistance(value, fromUnit, toUnit) {
+    const from = normalizeUnit(fromUnit);
+    const to = normalizeUnit(toUnit);
+    if (!from || !to) return null;
+    const fromMeters = UNIT_TO_METERS[from];
+    const toMeters = UNIT_TO_METERS[to];
+    if (!fromMeters || !toMeters) return null;
+    return value * (fromMeters / toMeters);
+  }
+
+  function getUnitsPerPixel(targetUnit) {
+    const target = normalizeUnit(targetUnit);
+    if (!target) return null;
+    if (appState.calibration) {
+      const baseUnit = normalizeUnit(appState.calibration.unit);
+      if (baseUnit) {
+        const conversion = convertDistance(1, baseUnit, target);
+        if (conversion != null) {
+          return appState.calibration.ratio * conversion;
+        }
+      }
+    }
+    const metersPerPixel = UNIT_TO_METERS.in / DEFAULT_PX_PER_INCH;
+    const targetMeters = UNIT_TO_METERS[target];
+    if (!targetMeters) return null;
+    return metersPerPixel / targetMeters;
+  }
+
+  function getPixelsPerUnit(targetUnit) {
+    const unitsPerPixel = getUnitsPerPixel(targetUnit);
+    if (!unitsPerPixel || unitsPerPixel <= 0) return null;
+    return 1 / unitsPerPixel;
   }
 
   const $ = sel => document.querySelector(sel);
@@ -1185,7 +1269,7 @@ textarea:focus-visible {
     drawHorizontalRuler();
     drawVerticalRuler();
     if (rulerCorner) {
-      rulerCorner.textContent = appState.calibration ? appState.calibration.unit : 'px';
+      rulerCorner.textContent = 'cm | in';
     }
   }
 
@@ -1206,41 +1290,13 @@ textarea:focus-visible {
     ctx.beginPath();
     ctx.moveTo(0, cssHeight - 0.5);
     ctx.lineTo(cssWidth, cssHeight - 0.5);
+    ctx.moveTo(0, cssHeight / 2);
+    ctx.lineTo(cssWidth, cssHeight / 2);
     ctx.stroke();
 
-    const worldPerPixel = appState.viewport.dpr / appState.viewport.zoom;
-    const desiredPx = 80;
-    const rawStep = desiredPx * worldPerPixel;
-    const step = chooseRulerStep(rawStep);
-    if (!Number.isFinite(step) || step <= 0) return;
-
-    const startWorld = screenToWorldX(RULER_SIZE);
-    const endWorld = screenToWorldX(RULER_SIZE + cssWidth);
-    const firstTick = Math.floor(startWorld / step) * step;
-    const stepCss = step * appState.viewport.zoom / appState.viewport.dpr;
-    const majorEvery = step >= 10 ? 1 : 5;
-
-    ctx.strokeStyle = '#94a3b8';
-    ctx.fillStyle = '#475569';
-    ctx.font = '10px/1 sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-
-    for (let value = firstTick; value <= endWorld + step; value += step) {
-      const cssPos = worldToScreenX(value) - RULER_SIZE;
-      if (cssPos < -stepCss) continue;
-      if (cssPos > cssWidth + stepCss) break;
-      const major = isMajorTick(value, step, majorEvery);
-      const tickTop = major ? 0 : cssHeight * 0.45;
-      ctx.beginPath();
-      ctx.moveTo(cssPos + 0.5, cssHeight);
-      ctx.lineTo(cssPos + 0.5, tickTop);
-      ctx.stroke();
-      if (major) {
-        const decimals = step < 1 ? 2 : step < 10 ? 1 : 0;
-        ctx.fillText(formatNumber(value, decimals), cssPos, 2);
-      }
-    }
+    const segmentHeight = cssHeight / 2;
+    drawHorizontalScale('cm', ctx, cssWidth, segmentHeight, 0, true);
+    drawHorizontalScale('in', ctx, cssWidth, segmentHeight, segmentHeight, false);
   }
 
   function drawVerticalRuler() {
@@ -1260,38 +1316,112 @@ textarea:focus-visible {
     ctx.beginPath();
     ctx.moveTo(cssWidth - 0.5, 0);
     ctx.lineTo(cssWidth - 0.5, cssHeight);
+    ctx.moveTo(cssWidth / 2, 0);
+    ctx.lineTo(cssWidth / 2, cssHeight);
     ctx.stroke();
 
-    const worldPerPixel = appState.viewport.dpr / appState.viewport.zoom;
-    const desiredPx = 80;
-    const rawStep = desiredPx * worldPerPixel;
-    const step = chooseRulerStep(rawStep);
-    if (!Number.isFinite(step) || step <= 0) return;
+    const segmentWidth = cssWidth / 2;
+    drawVerticalScale('in', ctx, cssHeight, segmentWidth, 0, false);
+    drawVerticalScale('cm', ctx, cssHeight, segmentWidth, segmentWidth, true);
+  }
 
+  function drawHorizontalScale(unit, ctx, cssWidth, segmentHeight, offsetY, alignTop) {
+    const pixelsPerUnit = getPixelsPerUnit(unit);
+    if (!pixelsPerUnit) return;
+    const pxPerUnitScreen = pixelsPerUnit * appState.viewport.zoom / appState.viewport.dpr;
+    const desiredPx = 80;
+    const desiredUnits = desiredPx / pxPerUnitScreen;
+    const stepUnits = chooseRulerStep(desiredUnits);
+    if (!Number.isFinite(stepUnits) || stepUnits <= 0) return;
+
+    const stepWorld = stepUnits * pixelsPerUnit;
+    const startWorld = screenToWorldX(RULER_SIZE);
+    const endWorld = screenToWorldX(RULER_SIZE + cssWidth);
+    const startUnits = startWorld / pixelsPerUnit;
+    const endUnits = endWorld / pixelsPerUnit;
+    const firstTick = Math.floor(startUnits / stepUnits) * stepUnits;
+    const stepCss = stepWorld * appState.viewport.zoom / appState.viewport.dpr;
+    const majorEvery = stepUnits >= 10 ? 1 : 5;
+    const baseline = alignTop ? segmentHeight : 0;
+    const label = unit === 'cm' ? 'cm' : unit === 'in' ? 'in' : unit;
+
+    ctx.save();
+    ctx.translate(0, offsetY);
+    ctx.strokeStyle = '#94a3b8';
+    ctx.fillStyle = '#475569';
+    ctx.font = '10px/1 sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = alignTop ? 'top' : 'bottom';
+
+    for (let value = firstTick; value <= endUnits + stepUnits; value += stepUnits) {
+      const world = value * pixelsPerUnit;
+      const cssPos = worldToScreenX(world) - RULER_SIZE;
+      if (cssPos < -stepCss) continue;
+      if (cssPos > cssWidth + stepCss) break;
+      const major = isMajorTick(value, stepUnits, majorEvery);
+      const delta = major ? Math.max(segmentHeight - 2, segmentHeight * 0.75) : segmentHeight * 0.55;
+      const start = baseline;
+      const end = alignTop ? Math.max(baseline - delta, 0) : Math.min(baseline + delta, segmentHeight);
+      ctx.beginPath();
+      ctx.moveTo(cssPos + 0.5, start);
+      ctx.lineTo(cssPos + 0.5, end);
+      ctx.stroke();
+      if (major) {
+        const decimals = stepUnits < 1 ? 2 : stepUnits < 10 ? 1 : 0;
+        ctx.fillText(formatNumber(value, decimals), cssPos, alignTop ? 2 : segmentHeight - 2);
+      }
+    }
+
+    ctx.fillStyle = '#1f2933';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = alignTop ? 'top' : 'bottom';
+    ctx.fillText(label, 4, alignTop ? 2 : segmentHeight - 2);
+    ctx.restore();
+  }
+
+  function drawVerticalScale(unit, ctx, cssHeight, segmentWidth, offsetX, alignRight) {
+    const pixelsPerUnit = getPixelsPerUnit(unit);
+    if (!pixelsPerUnit) return;
+    const pxPerUnitScreen = pixelsPerUnit * appState.viewport.zoom / appState.viewport.dpr;
+    const desiredPx = 80;
+    const desiredUnits = desiredPx / pxPerUnitScreen;
+    const stepUnits = chooseRulerStep(desiredUnits);
+    if (!Number.isFinite(stepUnits) || stepUnits <= 0) return;
+
+    const stepWorld = stepUnits * pixelsPerUnit;
     const startWorld = screenToWorldY(RULER_SIZE);
     const endWorld = screenToWorldY(RULER_SIZE + cssHeight);
-    const firstTick = Math.floor(startWorld / step) * step;
-    const stepCss = step * appState.viewport.zoom / appState.viewport.dpr;
-    const majorEvery = step >= 10 ? 1 : 5;
+    const startUnits = startWorld / pixelsPerUnit;
+    const endUnits = endWorld / pixelsPerUnit;
+    const firstTick = Math.floor(startUnits / stepUnits) * stepUnits;
+    const stepCss = stepWorld * appState.viewport.zoom / appState.viewport.dpr;
+    const majorEvery = stepUnits >= 10 ? 1 : 5;
+    const label = unit === 'cm' ? 'cm' : unit === 'in' ? 'in' : unit;
 
+    ctx.save();
+    ctx.translate(offsetX, 0);
     ctx.strokeStyle = '#94a3b8';
     ctx.fillStyle = '#475569';
     ctx.font = '10px/1 sans-serif';
 
-    for (let value = firstTick; value <= endWorld + step; value += step) {
-      const cssPos = worldToScreenY(value) - RULER_SIZE;
+    for (let value = firstTick; value <= endUnits + stepUnits; value += stepUnits) {
+      const world = value * pixelsPerUnit;
+      const cssPos = worldToScreenY(world) - RULER_SIZE;
       if (cssPos < -stepCss) continue;
       if (cssPos > cssHeight + stepCss) break;
-      const major = isMajorTick(value, step, majorEvery);
-      const tickLeft = major ? 0 : cssWidth * 0.4;
+      const major = isMajorTick(value, stepUnits, majorEvery);
+      const delta = major ? Math.max(segmentWidth - 2, segmentWidth * 0.75) : segmentWidth * 0.55;
+      const start = alignRight ? segmentWidth : 0;
+      const end = alignRight ? Math.max(segmentWidth - delta, 0) : Math.min(delta, segmentWidth);
       ctx.beginPath();
-      ctx.moveTo(cssWidth, cssPos + 0.5);
-      ctx.lineTo(cssWidth - tickLeft, cssPos + 0.5);
+      ctx.moveTo(start, cssPos + 0.5);
+      ctx.lineTo(end, cssPos + 0.5);
       ctx.stroke();
       if (major) {
-        const decimals = step < 1 ? 2 : step < 10 ? 1 : 0;
+        const decimals = stepUnits < 1 ? 2 : stepUnits < 10 ? 1 : 0;
         ctx.save();
-        ctx.translate(cssWidth - 2, cssPos);
+        const textX = alignRight ? segmentWidth - 2 : 2;
+        ctx.translate(textX, cssPos);
         ctx.rotate(-Math.PI / 2);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
@@ -1299,6 +1429,19 @@ textarea:focus-visible {
         ctx.restore();
       }
     }
+
+    ctx.save();
+    const textOffset = alignRight
+      ? Math.max(segmentWidth - 8, 2)
+      : Math.min(8, Math.max(segmentWidth / 2, 2));
+    ctx.translate(textOffset, 12);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#1f2933';
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
+    ctx.restore();
   }
 
   function chooseRulerStep(desired) {
