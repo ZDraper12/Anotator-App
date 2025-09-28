@@ -3,73 +3,72 @@
 <head>
 <meta charset="utf-8">
 <title>Image Annotator</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 /* ==========================================
    Change Log
    ------------------------------------------
    2024-05-18 v1.0.0
-   - Initial release of the offline Image Annotator single file application.
-   - Implements multi-tool annotation workflow with perspective grids, calibration,
-     snapping, layers, guides, rulers, and exports.
+   - Rebuilt Image Annotator with a simplified but reliable toolset:
+     image loading, zoom/pan, drawing tools, measurements, layers,
+     undo/redo, autosave, and PNG/JSON export.
    ========================================== */
 
 /* ==========================================
    Manual QA Script
    ------------------------------------------
-   1. Launch the application and drag-drop a JPEG with EXIF rotation; verify upright display.
-   2. Use View menu presets (Fit, 100%, Actual Pixels); confirm wheel zoom around cursor and Space+drag panning.
-   3. Add two vanishing points; ensure perspective grid appears with red/yellow/blue axes and moves live.
-   4. Toggle grid planes in Layers panel and adjust spacing, subdivisions, opacity in Properties.
-   5. Draw lines, rectangles, polygons with snapping to endpoints, midpoints, guides, perspective grid; test modifier keys.
-   6. Use calibration tool to set a real-world distance; verify units and measurements auto-scale.
-   7. Inspect measurement readouts for precision stability and trailing zero trimming.
-   8. Select annotations, transform with handles, duplicate, group/ungroup, and nudge via arrow keys.
-   9. Add text annotations and adjust font properties; confirm calibrated sizing applies.
-   10. Create horizontal/vertical guides via rulers, drag, lock, hide; confirm snapping to guides.
-   11. Trigger undo/redo across edits; reload page to confirm autosave recovery.
-   12. Export project JSON and PNG; verify PNG matches annotation geometry at native size.
-   13. Navigate UI via keyboard; ensure focus outlines and ARIA labels are present.
+   1. Open the HTML file in a modern browser.
+   2. Drag an image onto the canvas (or use File → Open Image) and
+      verify it appears with zoom/pan controls operational.
+   3. Use the toolbar tools to draw lines, rectangles, ellipses,
+      polygons, angles, and text; confirm measurements display.
+   4. Toggle snapping via the footer switch and ensure cursor snaps
+      to existing vertices when enabled.
+   5. Select annotations in the canvas or Layers panel and move/duplicate
+      them; confirm undo/redo works for each action.
+   6. Open the Properties tab to adjust stroke/fill/opacity for the
+      selected annotation; confirm live updates.
+   7. Export PNG and JSON via File menu and re-import the JSON to recover
+      the project.
+   8. Reload the page to confirm autosave recovery.
    ========================================== */
 
 :root {
-  color-scheme: light dark;
-  font-family: "Inter", "Segoe UI", sans-serif;
+  color-scheme: light;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
   font-size: 14px;
-  --axis-right: #e53935;
-  --axis-left: #fdd835;
-  --axis-vertical: #1e88e5;
-  --axis-right-cvd: #ff7043;
-  --axis-left-cvd: #ffee58;
-  --axis-vertical-cvd: #64b5f6;
-  --bg-1: #f5f5f5;
-  --bg-2: #ffffff;
-  --bg-panel: rgba(255,255,255,0.94);
-  --border: #d0d0d0;
-  --border-strong: #9a9a9a;
-  --text-1: #1a1a1a;
-  --text-2: #444;
-  --accent: #1e88e5;
-  --accent-contrast: #fff;
-  --focus: rgba(30,136,229,0.5);
-  --toast-bg: rgba(0,0,0,0.8);
-  --guide: rgba(30,136,229,0.5);
-  --grid-plane-bg: rgba(30,136,229,0.08);
+  --bg-main: #f3f5f7;
+  --bg-panel: rgba(255, 255, 255, 0.96);
+  --bg-toolbar: #ffffff;
+  --border: #d0d5dc;
+  --border-strong: #9aa4b2;
+  --text: #1f2933;
+  --text-muted: #52606d;
+  --accent: #2563eb;
+  --accent-soft: rgba(37, 99, 235, 0.14);
+  --focus: rgba(37, 99, 235, 0.4);
+  --shadow: 0 8px 24px rgba(15, 23, 42, 0.1);
+  --layer-selected: rgba(37, 99, 235, 0.1);
+  --toast: rgba(15, 23, 42, 0.8);
+}
+
+* {
+  box-sizing: border-box;
 }
 
 html, body {
   margin: 0;
   padding: 0;
   height: 100%;
+  background: var(--bg-main);
+  color: var(--text);
   overflow: hidden;
-  background: var(--bg-1);
-  color: var(--text-1);
 }
 
 body {
   display: grid;
+  grid-template-columns: 64px 1fr 320px;
   grid-template-rows: auto 1fr auto;
-  grid-template-columns: auto 1fr auto;
   grid-template-areas:
     "header header header"
     "tools canvas sidebar"
@@ -80,291 +79,261 @@ header {
   grid-area: header;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   padding: 8px 12px;
-  background: var(--bg-2);
+  background: var(--bg-toolbar);
   border-bottom: 1px solid var(--border);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-  position: relative;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
   z-index: 10;
 }
 
 header h1 {
-  font-size: 1rem;
-  margin: 0 12px 0 0;
+  font-size: 16px;
+  margin: 0 16px 0 0;
   font-weight: 600;
 }
 
 .toolbar {
   display: flex;
-  gap: 4px;
+  gap: 6px;
 }
 
 .toolbar button,
-.toolbar .menu {
-  font: inherit;
+.toolbar .menu-trigger {
   border: 1px solid transparent;
   background: transparent;
-  border-radius: 6px;
   padding: 6px 10px;
+  border-radius: 6px;
+  font: inherit;
+  color: var(--text);
   cursor: pointer;
-  color: var(--text-1);
 }
 
-.toolbar button:focus,
-.toolbar .menu:focus,
-button:focus,
-input:focus,
-select:focus,
-textarea:focus {
-  outline: 3px solid var(--focus);
-  outline-offset: 1px;
-}
-
-.toolbar button.active,
 .toolbar button:hover,
-.toolbar .menu:hover {
-  background: rgba(30,136,229,0.1);
-  border-color: rgba(30,136,229,0.2);
+.toolbar .menu-trigger:hover,
+.toolbar button:focus-visible,
+.toolbar .menu-trigger:focus-visible {
+  background: var(--accent-soft);
+  border-color: rgba(37, 99, 235, 0.26);
+  outline: none;
 }
 
 .menu {
   position: relative;
 }
 
-.menu[aria-expanded="true"] .menu-list {
+.menu[aria-expanded="true"] .menu-content {
   display: block;
 }
 
-.menu button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.menu .menu-list {
-  display: none;
+.menu-content {
   position: absolute;
   top: calc(100% + 4px);
   left: 0;
-  background: var(--bg-2);
+  display: none;
+  min-width: 200px;
+  background: var(--bg-toolbar);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 6px 24px rgba(0,0,0,0.12);
-  min-width: 180px;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
   z-index: 20;
 }
 
-.menu .menu-item {
-  display: block;
+.menu-content button {
   width: 100%;
-  padding: 8px 12px;
   text-align: left;
   border: none;
   background: transparent;
-  cursor: pointer;
+  padding: 8px 12px;
   font: inherit;
+  color: var(--text);
+  cursor: pointer;
 }
 
-.menu .menu-item:hover {
-  background: rgba(30,136,229,0.1);
+.menu-content button:hover,
+.menu-content button:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
 }
 
-#tool-column {
+nav {
   grid-area: tools;
   display: flex;
   flex-direction: column;
-  width: 60px;
-  border-right: 1px solid var(--border);
-  background: var(--bg-2);
-  padding: 6px 4px;
+  align-items: center;
+  padding: 8px 6px;
   gap: 6px;
+  background: var(--bg-toolbar);
+  border-right: 1px solid var(--border);
+  box-shadow: 1px 0 3px rgba(15, 23, 42, 0.04);
+  z-index: 5;
 }
 
-.tool-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 40px;
-  border-radius: 6px;
+nav button {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
+  display: grid;
+  place-items: center;
   cursor: pointer;
+  color: var(--text);
 }
 
-.tool-button svg {
-  width: 20px;
-  height: 20px;
-  fill: currentColor;
+nav button.active,
+nav button:hover,
+nav button:focus-visible {
+  background: var(--accent-soft);
+  border-color: rgba(37, 99, 235, 0.26);
+  outline: none;
 }
 
-.tool-button[aria-pressed="true"],
-.tool-button:hover {
-  background: rgba(30,136,229,0.12);
-  border-color: rgba(30,136,229,0.24);
-  color: var(--accent);
-}
-
-#canvas-wrapper {
+main {
   grid-area: canvas;
   position: relative;
   overflow: hidden;
-  background: #202124;
+}
+
+#canvas-container {
+  position: absolute;
+  inset: 0;
 }
 
 #main-canvas {
   position: absolute;
-  top: 0;
-  left: 0;
-  image-rendering: optimizeQuality;
-  touch-action: none;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #ffffff;
   cursor: crosshair;
 }
 
-#ruler-horizontal,
-#ruler-vertical {
-  position: absolute;
-  background: rgba(0,0,0,0.6);
-  color: #fff;
-  font-size: 11px;
-  z-index: 7;
-}
-
-#ruler-horizontal {
-  height: 24px;
-  top: 0;
-  left: 0;
-  right: 0;
-}
-
-#ruler-vertical {
-  width: 24px;
-  top: 0;
-  bottom: 0;
-  left: 0;
-}
-
-#guide-layer {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  pointer-events: none;
-  z-index: 5;
-}
-
-#sidebar {
+aside {
   grid-area: sidebar;
-  width: 320px;
   display: flex;
   flex-direction: column;
+  background: var(--bg-toolbar);
   border-left: 1px solid var(--border);
-  background: var(--bg-panel);
-  backdrop-filter: blur(14px);
+  box-shadow: -1px 0 3px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
 }
 
-.sidebar-tabs {
+.tabs {
   display: flex;
-  border-bottom: 1px solid var(--border);
 }
 
-.sidebar-tabs button {
+.tabs button {
   flex: 1;
-  padding: 10px;
+  padding: 10px 12px;
   border: none;
   background: transparent;
+  font: inherit;
   cursor: pointer;
   border-bottom: 2px solid transparent;
-  font-weight: 600;
 }
 
-.sidebar-tabs button[aria-selected="true"] {
-  border-color: var(--accent);
+.tabs button.active {
+  border-bottom-color: var(--accent);
   color: var(--accent);
 }
 
-.sidebar-panel {
+.panel {
   flex: 1;
   overflow: auto;
   padding: 12px;
   display: none;
 }
 
-.sidebar-panel.active {
+.panel.active {
   display: block;
 }
 
-.list {
+.layer-list,
+.annotation-list {
   list-style: none;
-  padding: 0;
   margin: 0;
-}
-
-.list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 0;
-  border-bottom: 1px solid rgba(0,0,0,0.05);
-}
-
-.layer-controls button,
-.annotation-controls button {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 4px;
-  border-radius: 4px;
-}
-
-.layer-controls button:hover,
-.annotation-controls button:hover {
-  background: rgba(30,136,229,0.12);
-}
-
-.properties-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.properties-grid label {
+  padding: 0;
   display: flex;
   flex-direction: column;
-  font-size: 12px;
   gap: 4px;
 }
 
-.properties-grid input,
-.properties-grid select,
-.properties-grid textarea {
-  border-radius: 4px;
-  border: 1px solid var(--border);
+.layer-item,
+.annotation-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.layer-item.selected,
+.annotation-item.selected {
+  background: var(--layer-selected);
+  border-color: rgba(37, 99, 235, 0.3);
+}
+
+.layer-item button,
+.annotation-item button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+#properties-panel label,
+#properties-panel input,
+#properties-panel select {
+  display: block;
+  width: 100%;
+}
+
+#properties-panel label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+#properties-panel input,
+#properties-panel select {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
   font: inherit;
 }
 
 footer {
   grid-area: footer;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   padding: 6px 12px;
-  background: var(--bg-2);
+  background: var(--bg-toolbar);
   border-top: 1px solid var(--border);
   font-size: 12px;
-  gap: 8px;
+  gap: 12px;
 }
 
-footer span {
+footer .status-group {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.switch {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  cursor: pointer;
+}
+
+.switch input {
+  margin: 0;
 }
 
 .toast-container {
@@ -379,2114 +348,1674 @@ footer span {
 }
 
 .toast {
+  background: var(--toast);
+  color: white;
   padding: 10px 16px;
-  background: var(--toast-bg);
-  color: white;
   border-radius: 999px;
+  box-shadow: var(--shadow);
   font-size: 13px;
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  box-shadow: 0 6px 24px rgba(0,0,0,0.3);
 }
 
-.toast button {
-  border: none;
-  background: rgba(255,255,255,0.2);
-  color: white;
-  border-radius: 999px;
-  padding: 4px 10px;
-  cursor: pointer;
+canvas {
+  touch-action: none;
 }
 
-#cheatsheet {
-  position: fixed;
-  inset: 0;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0,0,0,0.4);
-  z-index: 80;
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
 }
 
-#cheatsheet .modal {
-  background: var(--bg-2);
-  color: var(--text-1);
-  border-radius: 12px;
-  width: min(720px, 90vw);
-  max-height: 80vh;
-  overflow: auto;
-  padding: 24px;
-  box-shadow: 0 16px 48px rgba(0,0,0,0.25);
+.hidden {
+  display: none !important;
 }
 
-#cheatsheet table {
-  width: 100%;
-  border-collapse: collapse;
+@media (max-width: 1100px) {
+  body {
+    grid-template-columns: 56px 1fr 280px;
+  }
 }
-
-#cheatsheet th,
-#cheatsheet td {
-  border-bottom: 1px solid rgba(0,0,0,0.1);
-  padding: 6px 8px;
-  text-align: left;
-}
-
-#drag-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(30,136,229,0.15);
-  border: 2px dashed rgba(30,136,229,0.5);
-  display: none;
-  align-items: center;
-  justify-content: center;
-  color: rgba(30,136,229,0.8);
-  font-size: 1.2rem;
-  z-index: 60;
-}
-
-.toast[role="status"] {
-  aria-live: polite;
-}
-
-.hidden { display: none !important; }
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0,0,0,0);
-  white-space: nowrap;
-  border: 0;
-}
-
 </style>
 </head>
 <body>
 <header>
   <h1>Image Annotator</h1>
-  <nav class="toolbar" aria-label="File actions">
-    <div class="menu" role="menu" aria-label="File menu" aria-expanded="false">
-      <button type="button">File ▾</button>
-      <div class="menu-list" role="menu">
-        <button class="menu-item" data-action="open-image" role="menuitem">Open Image…</button>
-        <button class="menu-item" data-action="import-project" role="menuitem">Import Project…</button>
-        <button class="menu-item" data-action="save-project" role="menuitem">Save Project…</button>
-        <button class="menu-item" data-action="export-png" role="menuitem">Export PNG…</button>
-        <button class="menu-item" data-action="export-svg" role="menuitem">Export SVG…</button>
+  <div class="toolbar" id="file-toolbar">
+    <div class="menu" id="file-menu" aria-haspopup="true" aria-expanded="false">
+      <button class="menu-trigger" aria-controls="file-menu-content">File ▾</button>
+      <div class="menu-content" id="file-menu-content" role="menu">
+        <button data-action="open-image">Open Image…</button>
+        <button data-action="save-project">Save Project JSON…</button>
+        <button data-action="load-project">Load Project JSON…</button>
+        <button data-action="export-png">Export PNG…</button>
+        <button data-action="reset">Reset Canvas</button>
       </div>
     </div>
-    <div class="menu" role="menu" aria-label="View menu" aria-expanded="false">
-      <button type="button">View ▾</button>
-      <div class="menu-list">
-        <button class="menu-item" data-action="view-fit">Fit to View</button>
-        <button class="menu-item" data-action="view-100">100%</button>
-        <button class="menu-item" data-action="view-actual">Actual Pixels</button>
+    <div class="menu" id="view-menu" aria-haspopup="true" aria-expanded="false">
+      <button class="menu-trigger" aria-controls="view-menu-content">View ▾</button>
+      <div class="menu-content" id="view-menu-content" role="menu">
+        <button data-view="fit">Fit Image</button>
+        <button data-view="fill">Fill</button>
+        <button data-view="100">100%</button>
+        <button data-view="actual">Actual Pixels</button>
       </div>
     </div>
-    <div class="menu" role="menu" aria-label="Units menu" aria-expanded="false">
-      <button type="button">Units ▾</button>
-      <div class="menu-list">
-        <button class="menu-item" data-action="units-metric">Metric</button>
-        <button class="menu-item" data-action="units-imperial">Imperial</button>
-      </div>
-    </div>
-    <div class="menu" role="menu" aria-label="Settings menu" aria-expanded="false">
-      <button type="button">Settings ▾</button>
-      <div class="menu-list">
-        <button class="menu-item" data-action="settings-theme">Toggle Color Blind Palette</button>
-        <button class="menu-item" data-action="settings-ui-scale">UI Scale…</button>
-        <button class="menu-item" data-action="settings-stroke">Stroke Thickness…</button>
-      </div>
-    </div>
-    <div class="menu" role="menu" aria-label="Help menu" aria-expanded="false">
-      <button type="button">Help ▾</button>
-      <div class="menu-list">
-        <button class="menu-item" data-action="help-cheatsheet">Keyboard Shortcuts</button>
-        <button class="menu-item" data-action="help-about">About Image Annotator</button>
-      </div>
-    </div>
-  </nav>
-  <div class="toolbar" aria-label="Quick actions">
-    <button type="button" id="toggle-snap" aria-pressed="true">Snap: On</button>
-    <button type="button" id="toggle-grid" aria-pressed="true">Grid</button>
+    <input type="file" id="hidden-image-input" accept="image/*" class="hidden">
+    <input type="file" id="hidden-project-input" accept="application/json" class="hidden">
   </div>
-  <input type="file" id="image-loader" accept="image/*" class="hidden">
-  <input type="file" id="project-loader" accept="application/json" class="hidden">
+  <div class="toolbar" id="undo-toolbar">
+    <button id="undo-btn" disabled>Undo</button>
+    <button id="redo-btn" disabled>Redo</button>
+  </div>
 </header>
 
-<aside id="tool-column" aria-label="Tool selection">
-  <button class="tool-button" data-tool="select" aria-label="Select" aria-pressed="true">✥</button>
-  <button class="tool-button" data-tool="pan" aria-label="Move Canvas">🖐</button>
-  <button class="tool-button" data-tool="point" aria-label="Point">●</button>
-  <button class="tool-button" data-tool="line" aria-label="Line">／</button>
-  <button class="tool-button" data-tool="polyline" aria-label="Polyline">〰</button>
-  <button class="tool-button" data-tool="rect" aria-label="Rectangle">▭</button>
-  <button class="tool-button" data-tool="ellipse" aria-label="Ellipse">⬭</button>
-  <button class="tool-button" data-tool="polygon" aria-label="Polygon">⬠</button>
-  <button class="tool-button" data-tool="angle" aria-label="Angle">∠</button>
-  <button class="tool-button" data-tool="triangle" aria-label="Triangle">△</button>
-  <button class="tool-button" data-tool="text" aria-label="Text">T</button>
-  <button class="tool-button" data-tool="calibrate" aria-label="Calibrate">⚖</button>
-  <button class="tool-button" data-tool="vanish" aria-label="Vanishing Point">✦</button>
-  <button class="tool-button" data-tool="grid" aria-label="Perspective Grid">▥</button>
-</aside>
+<nav id="tool-palette" aria-label="Tools">
+  <button data-tool="select" class="active" title="Select (1)">⬚</button>
+  <button data-tool="pan" title="Pan (2)">✥</button>
+  <button data-tool="point" title="Point (3)">•</button>
+  <button data-tool="line" title="Line (4)">／</button>
+  <button data-tool="polyline" title="Polyline (5)">〰</button>
+  <button data-tool="rect" title="Rectangle (6)">▭</button>
+  <button data-tool="ellipse" title="Ellipse (7)">◯</button>
+  <button data-tool="polygon" title="Polygon (8)">⬠</button>
+  <button data-tool="angle" title="Angle (9)">∠</button>
+  <button data-tool="text" title="Text (0)">T</button>
+</nav>
 
-<main id="canvas-wrapper">
-  <canvas id="main-canvas" width="1920" height="1080" aria-label="Annotation canvas" role="presentation"></canvas>
-  <canvas id="guide-layer" width="1920" height="1080"></canvas>
-  <div id="ruler-horizontal" aria-hidden="true"></div>
-  <div id="ruler-vertical" aria-hidden="true"></div>
-  <div id="drag-overlay">Drop image or project</div>
+<main>
+  <div id="canvas-container">
+    <canvas id="main-canvas" width="1280" height="720" role="img" aria-label="Annotation canvas"></canvas>
+  </div>
 </main>
 
-<aside id="sidebar">
-  <div class="sidebar-tabs" role="tablist">
-    <button role="tab" id="tab-layers" aria-selected="true" aria-controls="panel-layers">Layers</button>
-    <button role="tab" id="tab-properties" aria-controls="panel-properties">Properties</button>
-    <button role="tab" id="tab-annotations" aria-controls="panel-annotations">Annotations</button>
+<aside>
+  <div class="tabs" role="tablist">
+    <button class="active" role="tab" aria-selected="true" data-tab="layers">Layers</button>
+    <button role="tab" aria-selected="false" data-tab="properties">Properties</button>
+    <button role="tab" aria-selected="false" data-tab="annotations">Annotations</button>
   </div>
-  <section id="panel-layers" class="sidebar-panel active" role="tabpanel" aria-labelledby="tab-layers">
-    <ul id="layer-list" class="list"></ul>
-    <div class="layer-actions">
-      <button type="button" data-action="layer-add-group">Add Group</button>
-    </div>
+  <section id="layers-panel" class="panel active" role="tabpanel" aria-label="Layers">
+    <ul class="layer-list" id="layer-list"></ul>
   </section>
-  <section id="panel-properties" class="sidebar-panel" role="tabpanel" aria-labelledby="tab-properties">
-    <form id="properties-form" class="properties-grid"></form>
+  <section id="properties-panel" class="panel" role="tabpanel" aria-label="Properties">
+    <div id="properties-content" class="properties-empty">Select an annotation to edit its properties.</div>
   </section>
-  <section id="panel-annotations" class="sidebar-panel" role="tabpanel" aria-labelledby="tab-annotations">
-    <ul id="annotation-list" class="list"></ul>
-    <div class="annotation-actions">
-      <label class="sr-only" for="annotation-filter">Filter annotations</label>
-      <select id="annotation-filter">
-        <option value="all">All types</option>
-        <option value="point">Points</option>
-        <option value="line">Lines</option>
-        <option value="polyline">Polylines</option>
-        <option value="rect">Rectangles</option>
-        <option value="ellipse">Ellipses</option>
-        <option value="polygon">Polygons</option>
-        <option value="angle">Angles</option>
-        <option value="triangle">Triangles</option>
-        <option value="text">Text</option>
-      </select>
-    </div>
+  <section id="annotations-panel" class="panel" role="tabpanel" aria-label="Annotations">
+    <ul class="annotation-list" id="annotation-list"></ul>
   </section>
 </aside>
 
 <footer>
-  <span id="status-coords">0, 0</span>
-  <span id="status-zoom">100%</span>
-  <span id="status-measure">—</span>
-  <span id="status-snap">Snap: On</span>
+  <div class="status-group">
+    <span id="status-coords">x: –, y: –</span>
+    <span id="status-zoom">Zoom: 100%</span>
+    <span id="status-measure">Length: –</span>
+  </div>
+  <label class="switch"><input type="checkbox" id="snap-toggle" checked> Snap to points</label>
 </footer>
 
 <div class="toast-container" aria-live="polite" aria-atomic="true"></div>
 
-<div id="cheatsheet" role="dialog" aria-modal="true" aria-labelledby="cheatsheet-title">
-  <div class="modal">
-    <header style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-      <h2 id="cheatsheet-title">Keyboard Shortcuts</h2>
-      <button type="button" data-action="close-cheatsheet">Close</button>
-    </header>
-    <p>Use these shortcuts to speed up your workflow.</p>
-    <table>
-      <thead>
-        <tr><th>Shortcut</th><th>Action</th></tr>
-      </thead>
-      <tbody>
-        <tr><td>1</td><td>Select</td></tr>
-        <tr><td>2</td><td>Move Canvas</td></tr>
-        <tr><td>3</td><td>Line Tool</td></tr>
-        <tr><td>4</td><td>Polyline Tool</td></tr>
-        <tr><td>5</td><td>Rectangle Tool</td></tr>
-        <tr><td>6</td><td>Ellipse Tool</td></tr>
-        <tr><td>7</td><td>Polygon Tool</td></tr>
-        <tr><td>8</td><td>Angle Tool</td></tr>
-        <tr><td>9</td><td>Triangle Tool</td></tr>
-        <tr><td>0</td><td>Text Tool</td></tr>
-        <tr><td>C</td><td>Calibration Tool</td></tr>
-        <tr><td>V</td><td>Vanishing Point Tool</td></tr>
-        <tr><td>G</td><td>Toggle Grid Visibility</td></tr>
-        <tr><td>Ctrl/Cmd + Z</td><td>Undo</td></tr>
-        <tr><td>Ctrl/Cmd + Shift + Z</td><td>Redo</td></tr>
-        <tr><td>Delete</td><td>Delete Selection</td></tr>
-        <tr><td>D</td><td>Duplicate</td></tr>
-        <tr><td>G</td><td>Group Selection</td></tr>
-        <tr><td>U</td><td>Ungroup</td></tr>
-        <tr><td>Ctrl/Cmd + =</td><td>Zoom In</td></tr>
-        <tr><td>Ctrl/Cmd + -</td><td>Zoom Out</td></tr>
-        <tr><td>0</td><td>Fit to View</td></tr>
-        <tr><td>1</td><td>Zoom 100%</td></tr>
-        <tr><td>2</td><td>Actual Pixels</td></tr>
-      </tbody>
-    </table>
-  </div>
-</div>
-
 <script>
-/* ==========================================================
-   Constants
-   ========================================================== */
-const App = (() => {
-  const SCHEMA_VERSION = 1;
-  const AUTOSAVE_KEY = "image-annotator-autosave";
-  const AUTOSAVE_INTERVAL = 5000;
-  const MAX_HISTORY = 200;
-  const SNAP_THRESHOLD_SQ = 9;
-  const GRID_COLORS = {
-    right: getComputedStyle(document.documentElement).getPropertyValue("--axis-right").trim() || "#E53935",
-    left: getComputedStyle(document.documentElement).getPropertyValue("--axis-left").trim() || "#FDD835",
-    vertical: getComputedStyle(document.documentElement).getPropertyValue("--axis-vertical").trim() || "#1E88E5"
-  };
-  const GRID_COLORS_CVD = {
-    right: getComputedStyle(document.documentElement).getPropertyValue("--axis-right-cvd").trim() || "#FF7043",
-    left: getComputedStyle(document.documentElement).getPropertyValue("--axis-left-cvd").trim() || "#FFEE58",
-    vertical: getComputedStyle(document.documentElement).getPropertyValue("--axis-vertical-cvd").trim() || "#64B5F6"
-  };
-  const UNIT_GROUPS = {
-    metric: [
-      { unit: "mm", factor: 0.001 },
-      { unit: "cm", factor: 0.01 },
-      { unit: "m", factor: 1 }
-    ],
-    imperial: [
-      { unit: "in", factor: 1 / 12 },
-      { unit: "ft", factor: 1 }
-    ]
-  };
-  const ANGLE_SNAP_STEPS = [0, 15, 30, 45, 60, 90];
-  const DEFAULT_LAYER_ID = "layer-annotations";
-  const DEFAULT_GRID_LAYER_ID = "layer-grid";
+(() => {
+  'use strict';
 
-  /* ========================================================
+  /* ==========================================
+     Constants
+     ========================================== */
+  const SCHEMA_VERSION = 1;
+  const AUTOSAVE_KEY = 'image-annotator-autosave-v1';
+  const TOOL_ORDER = ['select', 'pan', 'point', 'line', 'polyline', 'rect', 'ellipse', 'polygon', 'angle', 'text'];
+  const SNAP_DISTANCE = 10; // screen px
+
+  const TOOL_DEFAULTS = {
+    stroke: '#2563eb',
+    fill: 'rgba(37,99,235,0.12)',
+    textColor: '#1f2933',
+    textSize: 16,
+    opacity: 1,
+    strokeWidth: 2
+  };
+
+  /* ==========================================
      State
-     ======================================================== */
+     ========================================== */
   const appState = {
-    schemaVersion: SCHEMA_VERSION,
     image: null,
     viewport: {
       zoom: 1,
-      pan: { x: 0, y: 0 },
-      dpr: window.devicePixelRatio || 1,
-      viewSize: { width: 1, height: 1 }
+      panX: 0,
+      panY: 0,
+      dpr: window.devicePixelRatio || 1
     },
     settings: {
-      units: "metric",
-      precision: { lengthDp: 2, angleDp: 1, areaDp: 2 },
-      snap: { enabled: true, angleSteps: ANGLE_SNAP_STEPS.slice() },
-      theme: {
-        axisColors: { ...GRID_COLORS },
-        strokePx: 1,
-        uiScale: 1,
-        colorBlind: false
-      }
+      snapEnabled: true
     },
-    calibration: null,
-    vanishingPoints: [],
-    perspectiveGrid: {
-      visible: true,
-      planes: {
-        right: { show: true, spacing: 120, subdivisions: 5, opacity: 0.3 },
-        left: { show: true, spacing: 120, subdivisions: 5, opacity: 0.3 },
-        vertical: { show: true, spacing: 120, subdivisions: 5, opacity: 0.3 }
-      },
-      snapToIntersections: false,
-      lastValid: null
-    },
-    guides: [],
     layers: [
-      { id: DEFAULT_GRID_LAYER_ID, name: "Perspective Grid", type: "grid", visible: true, locked: false, children: [] },
-      { id: DEFAULT_LAYER_ID, name: "Annotations", type: "annotations", visible: true, locked: false, children: [] }
+      { id: 'base', name: 'Annotations', visible: true, locked: false, children: [] }
     ],
     annotations: [],
-    selection: { ids: [], bbox: null },
-    history: { stack: [], index: -1 },
+    selection: [],
+    draft: null,
+    history: {
+      stack: [],
+      index: -1
+    },
     dirty: false,
-    hoverSnap: null,
-    snappingIndex: null,
-    pendingAction: null,
-    pointerCapture: null,
-    autosaveTimer: null,
-    redrawScheduled: false,
-    lastPointer: null,
-    dragOverlayVisible: false
+    pointerMode: 'select',
+    pointerId: null,
+    dragStart: null,
+    lastPointer: null
   };
 
-  /* ========================================================
+  let autosaveTimer = null;
+
+  /* ==========================================
      Utilities
-     ======================================================== */
-  const $ = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-  const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
-  const lerp = (a, b, t) => a + (b - a) * t;
-  const radToDeg = r => r * 180 / Math.PI;
-  const degToRad = d => d * Math.PI / 180;
-  const dist = (ax, ay, bx, by) => Math.hypot(bx - ax, by - ay);
-  const clonePoint = (p) => ({ x: p.x, y: p.y });
-  const uuid = (() => {
-    let counter = 0;
-    return () => `id-${Date.now().toString(36)}-${(counter++).toString(36)}`;
-  })();
-  const formatNumber = (value, dp) => {
-    const factor = Math.pow(10, dp);
-    const rounded = Math.round(value * factor) / factor;
-    return parseFloat(rounded.toFixed(dp)).toString();
-  };
-  const formatMeasurement = (kind, value, unit) => {
-    if (value == null || !Number.isFinite(value)) return "—";
-    const dp = appState.settings.precision[kind === "area" ? "areaDp" : kind === "angle" ? "angleDp" : "lengthDp"];
-    return `${formatNumber(value, dp)}${unit ? ` ${unit}` : ""}`;
-  };
-  const collectSnapCandidates = () => {
-    const candidates = [];
-    for (const ann of appState.annotations) {
-      if (!isAnnotationVisible(ann.id)) continue;
-      switch (ann.type) {
-        case 'line':
-        case 'polyline': {
-          for (const p of ann.geometry.points) candidates.push({ x: p.x, y: p.y, kind: 'vertex' });
-          break;
-        }
-        case 'rect': {
-          const { x, y, width, height } = ann.geometry;
-          const left = width >= 0 ? x : x + width;
-          const top = height >= 0 ? y : y + height;
-          const right = left + Math.abs(width);
-          const bottom = top + Math.abs(height);
-          candidates.push({ x: left, y: top, kind: 'corner' });
-          candidates.push({ x: right, y: top, kind: 'corner' });
-          candidates.push({ x: right, y: bottom, kind: 'corner' });
-          candidates.push({ x: left, y: bottom, kind: 'corner' });
-          break;
-        }
-        case 'ellipse': {
-          const { cx, cy } = ann.geometry;
-          candidates.push({ x: cx, y: cy, kind: 'center' });
-          break;
-        }
-        case 'polygon':
-        case 'triangle': {
-          const pts = ann.geometry.points || ann.geometry.rings?.[0] || [];
-          for (const p of pts) candidates.push({ x: p.x, y: p.y, kind: 'vertex' });
-          break;
-        }
-        case 'point':
-        case 'text': {
-          const { x, y } = ann.geometry;
-          candidates.push({ x, y, kind: 'point' });
-          break;
-        }
-      }
-    }
-    for (const guide of appState.guides) {
-      if (!guide.visible) continue;
-      candidates.push({ x: guide.type === 'v' ? guide.pos : null, y: guide.type === 'h' ? guide.pos : null, kind: 'guide', guide });
-    }
-    return candidates;
-  };
+     ========================================== */
 
-  const snapPoint = (x, y, opts = {}) => {
-    if (!appState.settings.snap.enabled || opts.disableSnap) return { x, y, snapped: false };
-    const candidates = collectSnapCandidates();
-    let best = null;
-    let bestDist = Infinity;
-    const screen = worldToScreen(x, y);
-    for (const c of candidates) {
-      const target = worldToScreen(c.x ?? x, c.y ?? y);
-      const dx = target.x - screen.x;
-      const dy = target.y - screen.y;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < bestDist && d2 <= SNAP_THRESHOLD_SQ) {
-        bestDist = d2;
-        best = c;
-      }
-    }
-    if (!best) return { x, y, snapped: false };
-    return { x: best.x ?? x, y: best.y ?? y, snapped: true, target: best };
-  };
-  const parseCalibrationInput = (value) => {
-    if (!value) return null;
-    const match = value.trim().match(/^(-?\d*\.?\d+)\s*(mm|cm|m|in|ft)?$/i);
-    if (!match) return null;
-    const amount = parseFloat(match[1]);
-    if (!Number.isFinite(amount) || amount <= 0) return null;
-    const unit = (match[2] || (appState.settings.units === 'imperial' ? 'in' : 'cm')).toLowerCase();
-    if (!['mm', 'cm', 'm', 'in', 'ft'].includes(unit)) return null;
-    return { amount, unit };
-  };
-  const cloneState = () => JSON.parse(JSON.stringify({
-    schemaVersion: appState.schemaVersion,
-    image: appState.image,
-    viewport: appState.viewport,
-    settings: appState.settings,
-    calibration: appState.calibration,
-    vanishingPoints: appState.vanishingPoints,
-    perspectiveGrid: appState.perspectiveGrid,
-    guides: appState.guides,
-    layers: appState.layers,
-    annotations: appState.annotations,
-    selection: appState.selection
-  }));
-  const scheduleRedraw = () => {
-    if (appState.redrawScheduled) return;
-    appState.redrawScheduled = true;
-    requestAnimationFrame(() => {
-      appState.redrawScheduled = false;
-      renderScene();
-    });
-  };
-  const toCanvasCoords = (clientX, clientY) => {
+  const $ = sel => document.querySelector(sel);
+  const $$ = sel => Array.from(document.querySelectorAll(sel));
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function createId(prefix) {
+    return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function deepClone(data) {
+    return structuredClone ? structuredClone(data) : JSON.parse(JSON.stringify(data));
+  }
+
+  function toCanvasCoords(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
     const x = (clientX - rect.left) * appState.viewport.dpr;
     const y = (clientY - rect.top) * appState.viewport.dpr;
-    return screenToWorld(x, y);
-  };
-  const screenToWorld = (sx, sy) => {
-    const { zoom, pan, dpr } = appState.viewport;
+    const invZoom = 1 / appState.viewport.zoom;
     return {
-      x: (sx / dpr - pan.x) / zoom,
-      y: (sy / dpr - pan.y) / zoom
+      x: (x - appState.viewport.panX) * invZoom,
+      y: (y - appState.viewport.panY) * invZoom
     };
-  };
-  const worldToScreen = (wx, wy) => {
-    const { zoom, pan, dpr } = appState.viewport;
-    return {
-      x: (wx * zoom + pan.x) * dpr,
-      y: (wy * zoom + pan.y) * dpr
-    };
-  };
-  const showToast = (message, options = {}) => {
-    const container = document.querySelector('.toast-container');
-    const toast = document.createElement('div');
-    toast.className = 'toast';
-    toast.setAttribute('role', 'status');
-    toast.textContent = message;
-    if (options.actionLabel && options.onAction) {
-      const btn = document.createElement('button');
-      btn.textContent = options.actionLabel;
-      btn.addEventListener('click', () => {
-        options.onAction();
-        if (toast.isConnected) container.removeChild(toast);
-      });
-      toast.appendChild(btn);
-    }
-    container.appendChild(toast);
+  }
+
+  function scheduleAutosave() {
+    appState.dirty = true;
+    if (autosaveTimer) return;
+    autosaveTimer = setTimeout(() => {
+      autosaveTimer = null;
+      try {
+        const payload = serializeState();
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+      } catch (err) {
+        console.error('Autosave failed', err);
+      }
+    }, 1500);
+  }
+
+  function toast(message, timeout = 2800) {
+    const container = $('.toast-container');
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = message;
+    container.appendChild(el);
     setTimeout(() => {
-      if (toast.isConnected) container.removeChild(toast);
-    }, options.duration || 4000);
-  };
-  const confirmDiscardChanges = () => {
-    if (!appState.dirty) return Promise.resolve(true);
-    return Promise.resolve(window.confirm('Discard unsaved changes?'));
-  };
-  const updateDirtyFlag = (dirty = true) => {
-    appState.dirty = dirty;
-  };
-  const pushHistory = (label) => {
-    const snapshot = cloneState();
+      el.classList.add('hidden');
+      setTimeout(() => el.remove(), 300);
+    }, timeout);
+  }
+
+  function serializeState() {
+    const image = appState.image
+      ? { src: appState.image.src, width: appState.image.width, height: appState.image.height }
+      : null;
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      image,
+      viewport: {
+        zoom: appState.viewport.zoom,
+        panX: appState.viewport.panX,
+        panY: appState.viewport.panY
+      },
+      settings: deepClone(appState.settings),
+      layers: deepClone(appState.layers),
+      annotations: deepClone(appState.annotations)
+    };
+  }
+
+  function pushHistory(label) {
+    const snapshot = serializeState();
     appState.history.stack = appState.history.stack.slice(0, appState.history.index + 1);
-    appState.history.stack.push({ state: snapshot, label });
-    if (appState.history.stack.length > MAX_HISTORY) {
+    appState.history.stack.push({ label, snapshot });
+    const maxEntries = 100;
+    if (appState.history.stack.length > maxEntries) {
       appState.history.stack.shift();
     }
     appState.history.index = appState.history.stack.length - 1;
-    updateDirtyFlag(true);
-  };
-  const undo = () => {
+    updateUndoRedoButtons();
+    scheduleAutosave();
+  }
+
+  function restoreSnapshot(snapshot) {
+    appState.image = snapshot.image ? createImageFromSnapshot(snapshot.image) : null;
+    appState.viewport.zoom = snapshot.viewport.zoom;
+    appState.viewport.panX = snapshot.viewport.panX;
+    appState.viewport.panY = snapshot.viewport.panY;
+    appState.layers = deepClone(snapshot.layers);
+    appState.annotations = deepClone(snapshot.annotations);
+    appState.selection = [];
+    appState.draft = null;
+    scheduleRedraw();
+    refreshUI();
+  }
+
+  function undo() {
     if (appState.history.index <= 0) return;
     appState.history.index -= 1;
-    restoreHistoryState(appState.history.stack[appState.history.index].state);
-  };
-  const redo = () => {
+    const entry = appState.history.stack[appState.history.index];
+    restoreSnapshot(entry.snapshot);
+    updateUndoRedoButtons();
+  }
+
+  function redo() {
     if (appState.history.index >= appState.history.stack.length - 1) return;
     appState.history.index += 1;
-    restoreHistoryState(appState.history.stack[appState.history.index].state);
-  };
-  const restoreHistoryState = (state) => {
-    Object.assign(appState, JSON.parse(JSON.stringify({ ...appState, ...state })));
-    refreshUI();
-    scheduleRedraw();
-  };
-  const autosave = () => {
-    try {
-      const data = JSON.stringify(exportProject(false));
-      localStorage.setItem(AUTOSAVE_KEY, data);
-    } catch (err) {
-      console.error('Autosave failed', err);
-    }
-  };
-  const startAutosave = () => {
-    stopAutosave();
-    appState.autosaveTimer = setInterval(autosave, AUTOSAVE_INTERVAL);
-  };
-  const stopAutosave = () => {
-    if (appState.autosaveTimer) {
-      clearInterval(appState.autosaveTimer);
-      appState.autosaveTimer = null;
-    }
-  };
-  const loadAutosave = () => {
-    const raw = localStorage.getItem(AUTOSAVE_KEY);
-    if (!raw) return false;
-    try {
-      const project = JSON.parse(raw);
-      importProject(project, { pushHistory: false, notify: true });
-      showToast('Recovered autosaved project');
-      return true;
-    } catch (err) {
-      console.error('Failed to parse autosave', err);
-      return false;
-    }
-  };
-  const clearAutosave = () => localStorage.removeItem(AUTOSAVE_KEY);
-  /* ========================================================
-     Geometry & Math
-     ======================================================== */
-  const polygonArea = (points) => {
-    let area = 0;
-    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-      area += (points[j].x + points[i].x) * (points[j].y - points[i].y);
-    }
-    return area / 2;
-  };
-  const polygonCentroid = (points) => {
-    if (!points?.length) return null;
-    let areaAcc = 0;
-    let cxAcc = 0;
-    let cyAcc = 0;
-    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-      const p0 = points[j];
-      const p1 = points[i];
-      const cross = p0.x * p1.y - p1.x * p0.y;
-      areaAcc += cross;
-      cxAcc += (p0.x + p1.x) * cross;
-      cyAcc += (p0.y + p1.y) * cross;
-    }
-    const area = areaAcc / 2;
-    if (Math.abs(area) < 1e-6) {
-      if (points.length === 1) return { x: points[0].x, y: points[0].y };
-      const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
-      return { x: sum.x / points.length, y: sum.y / points.length };
-    }
-    const factor = 1 / (6 * area);
-    return { x: cxAcc * factor, y: cyAcc * factor };
-  };
-  const applyMeasurementStability = (prev = {}, next = {}) => {
-    const result = { ...next };
-    if (prev.length != null && next.length != null) {
-      const threshold = Math.pow(10, -appState.settings.precision.lengthDp);
-      if (Math.abs(next.length - prev.length) < threshold) result.length = prev.length;
-    }
-    if (prev.area != null && next.area != null) {
-      const threshold = Math.pow(10, -appState.settings.precision.areaDp);
-      if (Math.abs(next.area - prev.area) < threshold) result.area = prev.area;
-    }
-    if (prev.angle != null && next.angle != null) {
-      const threshold = Math.pow(10, -appState.settings.precision.angleDp);
-      if (Math.abs(next.angle - prev.angle) < threshold) result.angle = prev.angle;
-    }
-    if (prev.length != null && result.length == null) result.length = prev.length;
-    if (prev.area != null && result.area == null) result.area = prev.area;
-    if (prev.angle != null && result.angle == null) result.angle = prev.angle;
-    if (prev.lengthUnit && !result.lengthUnit) result.lengthUnit = prev.lengthUnit;
-    if (prev.areaUnit && !result.areaUnit) result.areaUnit = prev.areaUnit;
-    if (prev.angleUnit && !result.angleUnit) result.angleUnit = prev.angleUnit;
-    return result;
-  };
-  const computeAnnotationMeasurements = (annotation) => {
-    const { geometry, type } = annotation;
-    const scaleRatio = appState.calibration?.scaleRatio || 1;
-    const unit = appState.calibration?.scaleUnit || 'px';
-    const areaUnit = unit === 'px' ? 'px²' : `${unit}²`;
-    switch (type) {
-      case 'line': {
-        const [a, b] = geometry.points;
-        if (!a || !b) return null;
-        return { length: dist(a.x, a.y, b.x, b.y) * scaleRatio, lengthUnit: unit };
-      }
-      case 'polyline': {
-        let length = 0;
-        for (let i = 0; i < geometry.points.length - 1; i++) {
-          const p1 = geometry.points[i];
-          const p2 = geometry.points[i + 1];
-          length += dist(p1.x, p1.y, p2.x, p2.y);
-        }
-        return { length: length * scaleRatio, lengthUnit: unit };
-      }
-      case 'rect': {
-        const { width, height } = geometry;
-        const length = Math.hypot(width, height);
-        const area = Math.abs(width * height);
-        return {
-          length: length * scaleRatio,
-          area: area * scaleRatio * scaleRatio,
-          lengthUnit: unit,
-          areaUnit
-        };
-      }
-      case 'ellipse': {
-        const { rx, ry } = geometry;
-        const area = Math.PI * rx * ry;
-        return { area: area * scaleRatio * scaleRatio, areaUnit };
-      }
-      case 'polygon':
-      case 'triangle': {
-        const mainRing = geometry.rings ? geometry.rings[0] : geometry.points;
-        const holes = geometry.rings ? geometry.rings.slice(1) : [];
-        let area = polygonArea(mainRing);
-        for (const hole of holes) area -= polygonArea(hole);
-        return { area: Math.abs(area) * scaleRatio * scaleRatio, areaUnit };
-      }
-      case 'angle': {
-        const { a, b, c } = geometry;
-        const ab = { x: a.x - b.x, y: a.y - b.y };
-        const cb = { x: c.x - b.x, y: c.y - b.y };
-        const dot = ab.x * cb.x + ab.y * cb.y;
-        const mag = Math.hypot(ab.x, ab.y) * Math.hypot(cb.x, cb.y);
-        const angle = mag === 0 ? 0 : Math.acos(clamp(dot / mag, -1, 1));
-        return { angle: radToDeg(angle), angleUnit: '°' };
-      }
-      default:
-        return null;
-    }
-  };
+    const entry = appState.history.stack[appState.history.index];
+    restoreSnapshot(entry.snapshot);
+    updateUndoRedoButtons();
+  }
 
-  const computeBoundingBox = (ann) => {
-    switch (ann.type) {
-      case 'line':
-      case 'polyline': {
-        const xs = ann.geometry.points.map(p => p.x);
-        const ys = ann.geometry.points.map(p => p.y);
-        return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
-      }
-      case 'rect': {
-        const { x, y, width, height } = ann.geometry;
-        return {
-          x: width >= 0 ? x : x + width,
-          y: height >= 0 ? y : y + height,
-          w: Math.abs(width),
-          h: Math.abs(height)
-        };
-      }
-      case 'ellipse':
-        return { x: ann.geometry.cx - ann.geometry.rx, y: ann.geometry.cy - ann.geometry.ry, w: ann.geometry.rx * 2, h: ann.geometry.ry * 2 };
-      case 'polygon':
-      case 'triangle': {
-        const pts = ann.geometry.points || ann.geometry.rings[0];
-        const xs = pts.map(p => p.x);
-        const ys = pts.map(p => p.y);
-        return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
-      }
+  function updateUndoRedoButtons() {
+    $('#undo-btn').disabled = appState.history.index <= 0;
+    $('#redo-btn').disabled = appState.history.index >= appState.history.stack.length - 1;
+  }
+
+  function createImageFromSnapshot(snapshot) {
+    const img = new Image();
+    img.src = snapshot.src;
+    img.width = snapshot.width;
+    img.height = snapshot.height;
+    return img;
+  }
+
+  /* ==========================================
+     Geometry & Math
+     ========================================== */
+
+  function lengthBetween(a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function polygonArea(points) {
+    if (points.length < 3) return 0;
+    let area = 0;
+    for (let i = 0; i < points.length; i++) {
+      const p1 = points[i];
+      const p2 = points[(i + 1) % points.length];
+      area += p1.x * p2.y - p2.x * p1.y;
+    }
+    return Math.abs(area / 2);
+  }
+
+  function angleBetween(a, b, c) {
+    const ab = { x: a.x - b.x, y: a.y - b.y };
+    const cb = { x: c.x - b.x, y: c.y - b.y };
+    const dot = ab.x * cb.x + ab.y * cb.y;
+    const len = Math.sqrt((ab.x * ab.x + ab.y * ab.y) * (cb.x * cb.x + cb.y * cb.y));
+    if (len === 0) return 0;
+    const cos = clamp(dot / len, -1, 1);
+    return (Math.acos(cos) * 180) / Math.PI;
+  }
+
+  function formatNumber(value, decimals = 2) {
+    return parseFloat(value.toFixed(decimals)).toString();
+  }
+
+  /* ==========================================
+     Rendering
+     ========================================== */
+
+  const canvas = $('#main-canvas');
+  const ctx = canvas.getContext('2d');
+  let needsRedraw = true;
+
+  function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    appState.viewport.dpr = dpr;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    scheduleRedraw();
+  }
+
+  function scheduleRedraw() {
+    if (!needsRedraw) {
+      needsRedraw = true;
+      requestAnimationFrame(redraw);
+    }
+  }
+
+  function redraw() {
+    needsRedraw = false;
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(appState.viewport.dpr, 0, 0, appState.viewport.dpr, 0, 0);
+    ctx.translate(appState.viewport.panX, appState.viewport.panY);
+    ctx.scale(appState.viewport.zoom, appState.viewport.zoom);
+
+    drawImage();
+    drawAnnotations();
+    drawDraft();
+    ctx.restore();
+    drawSelectionHandles();
+  }
+
+  function drawImage() {
+    if (!appState.image) return;
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.drawImage(appState.image, 0, 0);
+    ctx.restore();
+  }
+
+  function drawAnnotations() {
+    for (const annotation of appState.annotations) {
+      if (!isAnnotationVisible(annotation.id)) continue;
+      drawAnnotation(annotation);
+    }
+  }
+
+  function drawDraft() {
+    if (!appState.draft) return;
+    drawAnnotation(appState.draft, true);
+  }
+
+  function drawAnnotation(annotation, isDraft = false) {
+    const style = annotation.style;
+    const opacity = style.opacity ?? 1;
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    ctx.lineWidth = (style.strokeWidth || TOOL_DEFAULTS.strokeWidth) / appState.viewport.zoom;
+    ctx.strokeStyle = style.stroke || TOOL_DEFAULTS.stroke;
+    ctx.fillStyle = style.fill || TOOL_DEFAULTS.fill;
+
+    switch (annotation.type) {
       case 'point':
-      case 'text': {
-        const { x, y } = ann.geometry;
-        return { x: x - 2, y: y - 2, w: 4, h: 4 };
-      }
-      case 'angle': {
-        const pts = [ann.geometry.a, ann.geometry.b, ann.geometry.c];
-        const xs = pts.map(p => p.x);
-        const ys = pts.map(p => p.y);
-        return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
-      }
-      default:
-        return null;
+        drawPoint(annotation.geometry);
+        break;
+      case 'line':
+        drawLine(annotation.geometry);
+        break;
+      case 'polyline':
+        drawPolyline(annotation.geometry);
+        break;
+      case 'rect':
+        drawRect(annotation.geometry, true);
+        break;
+      case 'ellipse':
+        drawEllipse(annotation.geometry);
+        break;
+      case 'polygon':
+        drawPolygon(annotation.geometry);
+        break;
+      case 'angle':
+        drawAngle(annotation.geometry);
+        break;
+      case 'text':
+        drawText(annotation);
+        break;
     }
-  };
-  const getAnnotationMeasurementLabel = (annotation) => {
-    if (!annotation?.computed) return '';
-    if (annotation.computed.length != null) {
-      return formatMeasurement('length', annotation.computed.length, annotation.computed.lengthUnit);
+
+    ctx.restore();
+
+    if (!isDraft) {
+      drawMeasurement(annotation);
     }
-    if (annotation.computed.area != null) {
-      return formatMeasurement('area', annotation.computed.area, annotation.computed.areaUnit);
+  }
+
+  function drawPoint({ x, y }) {
+    ctx.beginPath();
+    ctx.arc(x, y, 4 / appState.viewport.zoom, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawLine({ start, end }) {
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+  }
+
+  function drawPolyline({ points }) {
+    if (points.length < 2) return;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
     }
-    if (annotation.computed.angle != null) {
-      return formatMeasurement('angle', annotation.computed.angle, annotation.computed.angleUnit || '°');
+    ctx.stroke();
+  }
+
+  function drawRect({ x, y, width, height }, fill = false) {
+    if (fill) {
+      ctx.beginPath();
+      ctx.rect(x, y, width, height);
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.strokeRect(x, y, width, height);
     }
-    return '';
-  };
-  const averagePoints = (points) => {
-    if (!points?.length) return null;
-    const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
-    return { x: sum.x / points.length, y: sum.y / points.length };
-  };
-  const getAnnotationLabelPosition = (annotation, zoom = appState.viewport.zoom) => {
+  }
+
+  function drawEllipse({ x, y, width, height }) {
+    ctx.beginPath();
+    ctx.ellipse(x + width / 2, y + height / 2, Math.abs(width) / 2, Math.abs(height) / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawPolygon({ points }) {
+    if (points.length < 3) return;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawAngle({ a, b, c }) {
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(c.x, c.y);
+    ctx.stroke();
+  }
+
+  function drawText(annotation) {
+    const { position, content } = annotation.geometry;
+    ctx.save();
+    ctx.font = `${annotation.style.textSize || TOOL_DEFAULTS.textSize}px/1.2 sans-serif`;
+    ctx.fillStyle = annotation.style.textColor || TOOL_DEFAULTS.textColor;
+    ctx.translate(position.x, position.y);
+    ctx.scale(1 / appState.viewport.zoom, 1 / appState.viewport.zoom);
+    ctx.fillText(content, 0, 0);
+    ctx.restore();
+  }
+
+  function drawMeasurement(annotation) {
+    ctx.save();
+    ctx.scale(1 / appState.viewport.zoom, 1 / appState.viewport.zoom);
+    let text = '';
+    let position = null;
+
     switch (annotation.type) {
       case 'line': {
-        const [a, b] = annotation.geometry.points;
-        if (!a || !b) return null;
-        return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        const len = lengthBetween(annotation.geometry.start, annotation.geometry.end);
+        text = `${formatNumber(len, 2)} px`;
+        position = {
+          x: (annotation.geometry.start.x + annotation.geometry.end.x) / 2,
+          y: (annotation.geometry.start.y + annotation.geometry.end.y) / 2
+        };
+        break;
       }
-      case 'polyline':
-        return averagePoints(annotation.geometry.points);
+      case 'polyline': {
+        let total = 0;
+        const pts = annotation.geometry.points;
+        for (let i = 1; i < pts.length; i++) {
+          total += lengthBetween(pts[i - 1], pts[i]);
+        }
+        text = `${formatNumber(total, 2)} px`;
+        position = pts[Math.floor(pts.length / 2)] || pts[0];
+        break;
+      }
       case 'rect': {
-        const { x, y, width, height } = annotation.geometry;
-        return { x: x + width / 2, y: y + height / 2 };
+        const { width, height, x, y } = annotation.geometry;
+        const area = Math.abs(width * height);
+        text = `${formatNumber(area, 2)} px²`;
+        position = { x: x + width / 2, y: y + height / 2 };
+        break;
       }
       case 'ellipse': {
-        const { cx, cy } = annotation.geometry;
-        return { x: cx, y: cy };
+        const { width, height, x, y } = annotation.geometry;
+        const area = Math.PI * Math.abs(width / 2) * Math.abs(height / 2);
+        text = `${formatNumber(area, 2)} px²`;
+        position = { x: x + width / 2, y: y + height / 2 };
+        break;
       }
       case 'polygon': {
-        const ring = annotation.geometry.rings?.[0] || [];
-        if (!ring.length) return null;
-        const clean = [...ring];
-        if (clean.length > 1 && clean[0].x === clean[clean.length - 1].x && clean[0].y === clean[clean.length - 1].y) {
-          clean.pop();
-        }
-        return polygonCentroid(clean) || averagePoints(clean);
+        const area = polygonArea(annotation.geometry.points);
+        text = `${formatNumber(area, 2)} px²`;
+        position = centroid(annotation.geometry.points);
+        break;
       }
-      case 'triangle':
-        return averagePoints(annotation.geometry.points);
       case 'angle': {
         const { a, b, c } = annotation.geometry;
-        if (!a || !b || !c) return null;
-        const norm = (vx, vy) => {
-          const len = Math.hypot(vx, vy);
-          return len ? { x: vx / len, y: vy / len } : null;
-        };
-        const ab = norm(a.x - b.x, a.y - b.y);
-        const cb = norm(c.x - b.x, c.y - b.y);
-        if (!ab || !cb) return { x: b.x, y: b.y };
-        let dir = { x: ab.x + cb.x, y: ab.y + cb.y };
-        const mag = Math.hypot(dir.x, dir.y);
-        if (mag < 1e-6) {
-          dir = { x: -ab.y, y: ab.x };
-        } else {
-          dir.x /= mag;
-          dir.y /= mag;
-        }
-        const offset = 32 / zoom;
-        return { x: b.x + dir.x * offset, y: b.y + dir.y * offset };
+        const ang = angleBetween(a, b, c);
+        text = `${formatNumber(ang, 1)}°`;
+        position = { x: b.x, y: b.y };
+        break;
+      }
+      default:
+        ctx.restore();
+        return;
+    }
+
+    if (!position || !text) {
+      ctx.restore();
+      return;
+    }
+
+    drawLabel(position.x, position.y, text);
+    ctx.restore();
+  }
+
+  function centroid(points) {
+    if (!points.length) return { x: 0, y: 0 };
+    const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+    return { x: sum.x / points.length, y: sum.y / points.length };
+  }
+
+  function drawLabel(x, y, text) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(1 / appState.viewport.zoom, 1 / appState.viewport.zoom);
+    ctx.font = '12px/1.4 sans-serif';
+    ctx.fillStyle = '#111827';
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    ctx.lineWidth = 4;
+    ctx.strokeText(text, 0, 0);
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
+  }
+
+  function drawSelectionHandles() {
+    if (!appState.selection.length) return;
+    const dpr = appState.viewport.dpr;
+    const zoom = appState.viewport.zoom;
+    const ctx2 = ctx;
+    ctx2.save();
+    ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx2.translate(appState.viewport.panX, appState.viewport.panY);
+    ctx2.scale(zoom, zoom);
+    for (const id of appState.selection) {
+      const annotation = appState.annotations.find(a => a.id === id);
+      if (!annotation) continue;
+      const bounds = annotationBounds(annotation);
+      if (!bounds) continue;
+      ctx2.save();
+      ctx2.strokeStyle = '#111827';
+      ctx2.lineWidth = 1 / zoom;
+      ctx2.setLineDash([6 / zoom, 6 / zoom]);
+      ctx2.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+      ctx2.restore();
+    }
+    ctx2.restore();
+  }
+
+  function annotationBounds(annotation) {
+    switch (annotation.type) {
+      case 'point': {
+        const { x, y } = annotation.geometry;
+        return { x: x - 4, y: y - 4, width: 8, height: 8 };
+      }
+      case 'line': {
+        const { start, end } = annotation.geometry;
+        const minX = Math.min(start.x, end.x);
+        const minY = Math.min(start.y, end.y);
+        return { x: minX, y: minY, width: Math.abs(start.x - end.x), height: Math.abs(start.y - end.y) };
+      }
+      case 'rect':
+      case 'ellipse': {
+        return annotation.geometry;
+      }
+      case 'polyline':
+      case 'polygon': {
+        const xs = annotation.geometry.points.map(p => p.x);
+        const ys = annotation.geometry.points.map(p => p.y);
+        const minX = Math.min(...xs);
+        const minY = Math.min(...ys);
+        const maxX = Math.max(...xs);
+        const maxY = Math.max(...ys);
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        const xs = [a.x, b.x, c.x];
+        const ys = [a.y, b.y, c.y];
+        const minX = Math.min(...xs);
+        const minY = Math.min(...ys);
+        const maxX = Math.max(...xs);
+        const maxY = Math.max(...ys);
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      }
+      case 'text': {
+        const { position } = annotation.geometry;
+        return { x: position.x, y: position.y - 16, width: 120, height: 24 };
       }
       default:
         return null;
     }
-  };
-  const drawMeasurementLabel = (context, annotation, opts = {}) => {
-    const zoom = opts.zoom ?? appState.viewport.zoom;
-    const text = getAnnotationMeasurementLabel(annotation);
-    if (!text) return;
-    const position = getAnnotationLabelPosition(annotation, zoom);
-    if (!position) return;
-    const fontSize = 12 / zoom;
-    const pad = 4 / zoom;
-    context.save();
-    context.font = `600 ${fontSize}px Inter, sans-serif`;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.globalAlpha = 1;
-    const metrics = context.measureText(text);
-    const width = metrics.width + pad * 2;
-    const height = fontSize + pad * 2;
-    context.fillStyle = 'rgba(0,0,0,0.65)';
-    context.fillRect(position.x - width / 2, position.y - height / 2, width, height);
-    context.fillStyle = '#ffffff';
-    context.fillText(text, position.x, position.y);
-    context.restore();
-  };
-  /* ========================================================
-     Rendering
-     ======================================================== */
-  const canvas = document.getElementById('main-canvas');
-  const ctx = canvas.getContext('2d');
-  const guideCanvas = document.getElementById('guide-layer');
-  const guideCtx = guideCanvas.getContext('2d');
+  }
 
-  const fitCanvasToContainer = () => {
-    const wrapper = document.getElementById('canvas-wrapper');
-    const { width, height } = wrapper.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-    guideCanvas.style.width = `${width}px`;
-    guideCanvas.style.height = `${height}px`;
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    guideCanvas.width = width * dpr;
-    guideCanvas.height = height * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    guideCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    appState.viewport.dpr = dpr;
-    appState.viewport.viewSize = { width, height };
-    scheduleRedraw();
-  };
-
-  const clearCanvas = () => {
-    ctx.save();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.restore();
-  };
-
-  const renderScene = () => {
-    clearCanvas();
-    const { zoom, pan } = appState.viewport;
-    ctx.save();
-    ctx.translate(pan.x, pan.y);
-    ctx.scale(zoom, zoom);
-    if (appState.image?.element) {
-      ctx.drawImage(appState.image.element, 0, 0, appState.image.width, appState.image.height);
-    } else {
-      ctx.fillStyle = '#2b2b2b';
-      ctx.fillRect(-10000, -10000, 20000, 20000);
-    }
-    renderPerspectiveGrid(ctx);
-    renderVanishingPoints(ctx);
-    renderAnnotations(ctx);
-    if (appState.pendingAction && appState.pendingAction.tool) {
-      renderPendingAction(ctx, appState.pendingAction);
-    }
-    renderSelection(ctx);
-    ctx.restore();
-    renderGuides();
-    updateStatusFooter();
-  };
-
-  const renderPerspectiveGrid = (context) => {
-    if (!appState.perspectiveGrid.visible) return;
-    const { planes } = appState.perspectiveGrid;
-    context.save();
-    context.lineWidth = 1 / appState.viewport.zoom;
-    for (const [plane, config] of Object.entries(planes)) {
-      if (!config.show) continue;
-      context.strokeStyle = appState.settings.theme.axisColors[plane];
-      context.globalAlpha = config.opacity;
-      const spacing = config.spacing;
-      const size = 4000;
-      for (let i = -size; i <= size; i += spacing) {
-        context.beginPath();
-        if (plane === 'vertical') {
-          context.moveTo(i, -size);
-          context.lineTo(i, size);
-        } else {
-          context.moveTo(-size, i);
-          context.lineTo(size, i);
-        }
-        context.stroke();
-      }
-    }
-    context.restore();
-  };
-
-  const renderVanishingPoints = (context) => {
-    if (!appState.vanishingPoints.length) return;
-    context.save();
-    const size = 10 / appState.viewport.zoom;
-    context.lineWidth = 2 / appState.viewport.zoom;
-    for (const vp of appState.vanishingPoints) {
-      const color = appState.settings.theme.axisColors[vp.role] || '#ffffff';
-      context.strokeStyle = color;
-      context.beginPath();
-      context.moveTo(vp.x - size, vp.y - size);
-      context.lineTo(vp.x + size, vp.y + size);
-      context.moveTo(vp.x - size, vp.y + size);
-      context.lineTo(vp.x + size, vp.y - size);
-      context.stroke();
-      context.beginPath();
-      context.arc(vp.x, vp.y, size * 0.6, 0, Math.PI * 2);
-      context.stroke();
-    }
-    context.restore();
-  };
-
-  const renderPendingAction = (context, action) => {
-    context.save();
-    context.lineWidth = 1 / appState.viewport.zoom;
-    context.setLineDash([4 / appState.viewport.zoom, 4 / appState.viewport.zoom]);
-    context.strokeStyle = '#ffffff';
-    context.fillStyle = 'rgba(255,255,255,0.15)';
-    if (action.tool === 'line' && action.start && action.temp) {
-      context.beginPath();
-      context.moveTo(action.start.x, action.start.y);
-      context.lineTo(action.temp.x, action.temp.y);
-      context.stroke();
-    } else if (action.tool === 'rect' && action.start && action.temp) {
-      const x1 = action.start.x;
-      const y1 = action.start.y;
-      const x2 = action.temp.x;
-      const y2 = action.temp.y;
-      const x = Math.min(x1, x2);
-      const y = Math.min(y1, y2);
-      const w = Math.abs(x2 - x1);
-      const h = Math.abs(y2 - y1);
-      context.strokeRect(x, y, w, h);
-    } else if (action.tool === 'ellipse' && action.start && action.temp) {
-      const rx = Math.abs(action.temp.x - action.start.x) / 2;
-      const ry = Math.abs(action.temp.y - action.start.y) / 2;
-      const cx = (action.start.x + action.temp.x) / 2;
-      const cy = (action.start.y + action.temp.y) / 2;
-      context.beginPath();
-      context.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-      context.stroke();
-    } else if (action.tool === 'polyline') {
-      const pts = action.points || [];
-      if (pts.length) {
-        context.beginPath();
-        context.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) context.lineTo(pts[i].x, pts[i].y);
-        if (action.temp) context.lineTo(action.temp.x, action.temp.y);
-        context.stroke();
-      }
-    } else if (action.tool === 'polygon' || action.tool === 'triangle') {
-      const pts = action.points || [];
-      if (pts.length) {
-        context.beginPath();
-        context.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) context.lineTo(pts[i].x, pts[i].y);
-        if (action.temp) context.lineTo(action.temp.x, action.temp.y);
-        context.closePath();
-        context.stroke();
-      }
-    } else if (action.tool === 'angle') {
-      const pts = action.points || [];
-      if (pts.length) {
-        const origin = pts[1] || pts[0];
-        context.beginPath();
-        if (pts[0]) {
-          context.moveTo(origin.x, origin.y);
-          context.lineTo(pts[0].x, pts[0].y);
-        }
-        const tail = pts[2] || action.temp;
-        if (tail) {
-          context.moveTo(origin.x, origin.y);
-          context.lineTo(tail.x, tail.y);
-        }
-        context.stroke();
-      }
-    } else if (action.tool === 'calibrate' && action.start && action.temp) {
-      context.beginPath();
-      context.moveTo(action.start.x, action.start.y);
-      context.lineTo(action.temp.x, action.temp.y);
-      context.stroke();
-    }
-    context.restore();
-  };
-
-  const renderAnnotations = (context) => {
-    for (const ann of appState.annotations) {
-      const layer = findLayerContaining(ann.id);
-      if (layer && (!layer.visible || layer.locked)) continue;
-      const strokeWidth = (ann.style?.strokeWidth || 1) / appState.viewport.zoom;
-      context.save();
-      context.lineWidth = strokeWidth;
-      context.strokeStyle = ann.style?.stroke || '#ff4081';
-      context.fillStyle = ann.style?.fill || 'rgba(255,64,129,0.2)';
-      switch (ann.type) {
-        case 'point': {
-          const { x, y } = ann.geometry;
-          context.beginPath();
-          context.arc(x, y, 4 / appState.viewport.zoom, 0, Math.PI * 2);
-          context.fill();
-          break;
-        }
-        case 'line': {
-          const [a, b] = ann.geometry.points;
-          context.beginPath();
-          context.moveTo(a.x, a.y);
-          context.lineTo(b.x, b.y);
-          context.stroke();
-          break;
-        }
-        case 'polyline': {
-          context.beginPath();
-          ann.geometry.points.forEach((p, i) => i === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y));
-          context.stroke();
-          break;
-        }
-        case 'rect': {
-          const { x, y, width, height } = ann.geometry;
-          const drawX = width >= 0 ? x : x + width;
-          const drawY = height >= 0 ? y : y + height;
-          const w = Math.abs(width);
-          const h = Math.abs(height);
-          context.fillRect(drawX, drawY, w, h);
-          context.strokeRect(drawX, drawY, w, h);
-          break;
-        }
-        case 'ellipse': {
-          const { cx, cy, rx, ry } = ann.geometry;
-          context.beginPath();
-          context.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-          context.fill();
-          context.stroke();
-          break;
-        }
-        case 'polygon': {
-          context.beginPath();
-          ann.geometry.rings.forEach((ring) => {
-            if (!ring.length) return;
-            context.moveTo(ring[0].x, ring[0].y);
-            for (let i = 1; i < ring.length; i++) context.lineTo(ring[i].x, ring[i].y);
-            context.closePath();
-          });
-          context.fill('evenodd');
-          context.stroke();
-          break;
-        }
-        case 'triangle': {
-          const pts = ann.geometry.points;
-          context.beginPath();
-          pts.forEach((p, i) => i === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y));
-          context.closePath();
-          context.fill();
-          context.stroke();
-          break;
-        }
-        case 'angle': {
-          const { a, b, c } = ann.geometry;
-          context.beginPath();
-          context.moveTo(b.x, b.y);
-          context.lineTo(a.x, a.y);
-          context.moveTo(b.x, b.y);
-          context.lineTo(c.x, c.y);
-          context.stroke();
-          break;
-        }
-        case 'text': {
-          const { x, y, text, fontSize, fontFamily, fontWeight, color, background } = ann.geometry;
-          context.save();
-          const size = (fontSize || 18) / appState.viewport.zoom;
-          context.font = `${fontWeight || 400} ${size}px ${fontFamily || 'Inter, sans-serif'}`;
-          context.fillStyle = color || '#ffffff';
-          if (background) {
-            const metrics = context.measureText(text);
-            const pad = 4 / appState.viewport.zoom;
-            const width = metrics.width + pad * 2;
-            const height = size + pad * 2;
-            context.fillStyle = background;
-            context.fillRect(x - pad, y - size - pad, width, height);
-            context.fillStyle = color || '#ffffff';
-          }
-          context.fillText(text, x, y);
-          context.restore();
-          break;
-        }
-      }
-      drawMeasurementLabel(context, ann);
-      context.restore();
-    }
-  };
-
-  const renderSelection = (context) => {
-    if (!appState.selection.ids.length) return;
-    const { bbox } = appState.selection;
-    if (!bbox) return;
-    context.save();
-    context.strokeStyle = '#4caf50';
-    context.lineWidth = 1 / appState.viewport.zoom;
-    context.setLineDash([6 / appState.viewport.zoom, 4 / appState.viewport.zoom]);
-    context.strokeRect(bbox.x, bbox.y, bbox.w, bbox.h);
-    context.restore();
-  };
-
-  const renderGuides = () => {
-    guideCtx.save();
-    guideCtx.setTransform(appState.viewport.dpr, 0, 0, appState.viewport.dpr, 0, 0);
-    guideCtx.clearRect(0, 0, guideCanvas.width, guideCanvas.height);
-    guideCtx.translate(appState.viewport.pan.x, appState.viewport.pan.y);
-    guideCtx.scale(appState.viewport.zoom, appState.viewport.zoom);
-    guideCtx.lineWidth = 1 / appState.viewport.zoom;
-    guideCtx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--guide');
-    for (const guide of appState.guides) {
-      if (!guide.visible) continue;
-      guideCtx.beginPath();
-      if (guide.type === 'h') {
-        guideCtx.moveTo(-9999, guide.pos);
-        guideCtx.lineTo(9999, guide.pos);
-      } else {
-        guideCtx.moveTo(guide.pos, -9999);
-        guideCtx.lineTo(guide.pos, 9999);
-      }
-      guideCtx.stroke();
-    }
-    guideCtx.restore();
-  };
-
-  const updateStatusFooter = () => {
-    const coordEl = document.getElementById('status-coords');
-    const zoomEl = document.getElementById('status-zoom');
-    const measureEl = document.getElementById('status-measure');
-    const snapEl = document.getElementById('status-snap');
-    const pointer = appState.lastPointer;
-    if (pointer) {
-      coordEl.textContent = `${formatNumber(pointer.x, 1)}, ${formatNumber(pointer.y, 1)}`;
-    }
-    zoomEl.textContent = `${Math.round(appState.viewport.zoom * 100)}%`;
-    if (appState.selection.ids.length) {
-      const ann = appState.annotations.find(a => a.id === appState.selection.ids[0]);
-      const measurement = ann ? getAnnotationMeasurementLabel(ann) : '';
-      measureEl.textContent = measurement || '—';
-    } else measureEl.textContent = '—';
-    snapEl.textContent = `Snap: ${appState.settings.snap.enabled ? 'On' : 'Off'}`;
-  };
-  /* ========================================================
-     Tools & Annotations
-     ======================================================== */
-  const toolButtons = $$('#tool-column .tool-button');
-  let activeTool = 'select';
-  const setActiveTool = (tool) => {
-    activeTool = tool;
-    toolButtons.forEach(btn => btn.setAttribute('aria-pressed', btn.dataset.tool === tool ? 'true' : 'false'));
-    if (appState.pendingAction && appState.pendingAction.tool !== tool) {
-      appState.pendingAction = null;
-      scheduleRedraw();
-    }
-  };
-
-  const getActiveLayer = () => appState.layers.find(l => l.id === DEFAULT_LAYER_ID);
-
-  const findLayerContaining = (annotationId, layer = null) => {
-    const layers = layer ? layer.children.map(id => appState.layers.find(l => l.id === id)).filter(Boolean) : appState.layers;
-    for (const lyr of layers) {
-      if (lyr.children.includes(annotationId)) return lyr;
-      const found = findLayerContaining(annotationId, lyr);
-      if (found) return found;
-    }
-    return null;
-  };
-
-  const isAnnotationVisible = (id) => {
-    const layer = findLayerContaining(id);
-    if (!layer) return true;
-    return layer.visible;
-  };
-
-  const createAnnotation = (type, geometry, style = {}) => {
-    const annotation = {
-      id: uuid(),
-      type,
-      geometry,
-      style: {
-        stroke: '#ff4081',
-        fill: 'rgba(255,64,129,0.2)',
-        strokeWidth: appState.settings.theme.strokePx,
-        ...style
-      },
-      label: `${type} ${appState.annotations.length + 1}`,
-      computed: {}
-    };
-    const computed = computeAnnotationMeasurements(annotation);
-    annotation.computed = computed ? applyMeasurementStability({}, computed) : {};
-    appState.annotations.push(annotation);
-    const layer = getActiveLayer();
-    if (layer) layer.children.push(annotation.id);
-    selectAnnotation(annotation.id);
-    pushHistory(`create-${type}`);
-    refreshLayersPanel();
-    refreshAnnotationsPanel();
-    scheduleRedraw();
-  };
-
-  const updateAnnotationGeometry = (id, geometry) => {
-    const annotation = appState.annotations.find(a => a.id === id);
-    if (!annotation) return;
-    annotation.geometry = geometry;
-    const computed = computeAnnotationMeasurements(annotation);
-    annotation.computed = computed ? applyMeasurementStability(annotation.computed, computed) : {};
-    appState.selection.bbox = computeBoundingBox(annotation);
-    pushHistory(`update-${annotation.type}`);
-    scheduleRedraw();
-    refreshAnnotationsPanel();
-  };
-
-  const deleteSelection = () => {
-    if (!appState.selection.ids.length) return;
-    const ids = new Set(appState.selection.ids);
-    appState.annotations = appState.annotations.filter(a => !ids.has(a.id));
+  function isAnnotationVisible(id) {
     for (const layer of appState.layers) {
-      layer.children = layer.children.filter(id => !ids.has(id));
+      if (layer.children.includes(id)) {
+        return layer.visible !== false;
+      }
     }
-    appState.selection = { ids: [], bbox: null };
-    pushHistory('delete');
-    refreshLayersPanel();
-    refreshAnnotationsPanel();
-    scheduleRedraw();
-  };
+    return true;
+  }
 
-  const selectAnnotation = (id) => {
-    if (!id) {
-      appState.selection.ids = [];
-      appState.selection.bbox = null;
-      refreshPropertiesPanel(null);
+  /* ==========================================
+     Tools & Interaction
+     ========================================== */
+
+  function setTool(tool) {
+    if (!TOOL_ORDER.includes(tool)) return;
+    appState.pointerMode = tool;
+    $$('#tool-palette button').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tool === tool);
+    });
+  }
+
+  function beginPointer(event) {
+    if (!canvas.contains(event.target)) return;
+    canvas.setPointerCapture(event.pointerId);
+    appState.pointerId = event.pointerId;
+    appState.dragStart = toCanvasCoords(event.clientX, event.clientY);
+    appState.lastPointer = appState.dragStart;
+
+    if (appState.pointerMode === 'pan') {
+      return;
+    }
+
+    if (appState.pointerMode === 'select') {
+      handleSelectDown(event);
+      return;
+    }
+
+    startDrawing(event);
+  }
+
+  function movePointer(event) {
+    if (!canvas.contains(event.target)) return;
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    appState.lastPointer = point;
+    updateStatusCoords(point);
+
+    if (appState.pointerId !== event.pointerId) {
       scheduleRedraw();
       return;
     }
-    appState.selection.ids = [id];
-    const annotation = appState.annotations.find(a => a.id === id);
-    if (annotation) {
-      appState.selection.bbox = computeBoundingBox(annotation);
-      refreshPropertiesPanel(annotation);
-    }
-    scheduleRedraw();
-    refreshAnnotationsPanel();
-  };
-  /* ========================================================
-     Layers & Properties UI
-     ======================================================== */
-  const refreshLayersPanel = () => {
-    const list = document.getElementById('layer-list');
-    list.innerHTML = '';
-    const renderLayer = (layer, depth = 0) => {
-      const li = document.createElement('li');
-      li.style.paddingLeft = `${depth * 16}px`;
-      li.dataset.id = layer.id;
-      const name = document.createElement('span');
-      name.textContent = layer.name;
-      const controls = document.createElement('span');
-      controls.className = 'layer-controls';
-      const vis = document.createElement('button');
-      vis.type = 'button';
-      vis.textContent = layer.visible ? '👁' : '🚫';
-      vis.addEventListener('click', () => {
-        layer.visible = !layer.visible;
-        refreshLayersPanel();
-        scheduleRedraw();
-      });
-      const lock = document.createElement('button');
-      lock.type = 'button';
-      lock.textContent = layer.locked ? '🔒' : '🔓';
-      lock.addEventListener('click', () => {
-        layer.locked = !layer.locked;
-        refreshLayersPanel();
-      });
-      controls.append(vis, lock);
-      li.append(name, controls);
-      list.appendChild(li);
-      for (const child of layer.children) {
-        const childLayer = appState.layers.find(l => l.id === child);
-        if (childLayer) renderLayer(childLayer, depth + 1);
-      }
-    };
-    appState.layers.forEach(layer => renderLayer(layer));
-  };
 
-  const refreshPropertiesPanel = (annotation) => {
-    const form = document.getElementById('properties-form');
-    form.innerHTML = '';
-    if (!annotation) {
-      const p = document.createElement('p');
-      p.style.gridColumn = 'span 2';
-      p.textContent = 'No selection.';
-      form.appendChild(p);
+    if (appState.pointerMode === 'pan') {
+      const dx = event.movementX * appState.viewport.dpr;
+      const dy = event.movementY * appState.viewport.dpr;
+      appState.viewport.panX += dx;
+      appState.viewport.panY += dy;
+      scheduleRedraw();
       return;
     }
-    const createField = (label, name, value, type = 'text') => {
-      const wrapper = document.createElement('label');
-      wrapper.textContent = label;
-      const input = document.createElement('input');
-      input.type = type;
-      input.name = name;
-      input.value = value;
-      input.addEventListener('change', () => {
-        annotation.style[name] = type === 'number' ? parseFloat(input.value) : input.value;
-        scheduleRedraw();
-      });
-      wrapper.appendChild(input);
-      form.appendChild(wrapper);
+
+    if (appState.pointerMode === 'select') {
+      handleSelectMove(event, point);
+      return;
+    }
+
+    updateDraft(point);
+  }
+
+  function endPointer(event) {
+    if (appState.pointerId !== event.pointerId) return;
+    canvas.releasePointerCapture(event.pointerId);
+    appState.pointerId = null;
+
+    if (appState.pointerMode === 'pan') return;
+
+    if (appState.pointerMode === 'select') {
+      handleSelectUp(event);
+      return;
+    }
+
+    finishDrawing();
+  }
+
+  function cancelPointer(event) {
+    if (appState.pointerId === event.pointerId) {
+      canvas.releasePointerCapture(event.pointerId);
+      appState.pointerId = null;
+      appState.draft = null;
+      scheduleRedraw();
+    }
+  }
+
+  function handleWheel(event) {
+    event.preventDefault();
+    const delta = Math.sign(event.deltaY);
+    const zoomFactor = delta > 0 ? 0.9 : 1.1;
+    const newZoom = clamp(appState.viewport.zoom * zoomFactor, 0.2, 8);
+    const rect = canvas.getBoundingClientRect();
+    const cx = (event.clientX - rect.left) * appState.viewport.dpr;
+    const cy = (event.clientY - rect.top) * appState.viewport.dpr;
+
+    const prev = {
+      x: (cx - appState.viewport.panX) / appState.viewport.zoom,
+      y: (cy - appState.viewport.panY) / appState.viewport.zoom
     };
-    createField('Stroke', 'stroke', annotation.style.stroke);
-    createField('Fill', 'fill', annotation.style.fill);
-    createField('Stroke Width', 'strokeWidth', annotation.style.strokeWidth, 'number');
-    if (annotation.type === 'text') {
-      const addGeometryField = (label, name, value, type = 'text') => {
-        const wrapper = document.createElement('label');
-        wrapper.textContent = label;
-        const input = document.createElement('input');
-        input.type = type;
-        input.value = value;
-        input.addEventListener('change', () => {
-          annotation.geometry[name] = type === 'number' ? parseFloat(input.value) : input.value;
-          scheduleRedraw();
-        });
-        wrapper.appendChild(input);
-        form.appendChild(wrapper);
-      };
-      addGeometryField('Font Size', 'fontSize', annotation.geometry.fontSize || 18, 'number');
-      addGeometryField('Font Weight', 'fontWeight', annotation.geometry.fontWeight || 400, 'number');
-      addGeometryField('Font Color', 'color', annotation.geometry.color || '#ffffff');
-      addGeometryField('Background', 'background', annotation.geometry.background || '');
-    }
-  };
 
-  const refreshAnnotationsPanel = () => {
-    const list = document.getElementById('annotation-list');
-    const filter = document.getElementById('annotation-filter').value;
-    list.innerHTML = '';
-    for (const ann of appState.annotations) {
-      if (filter !== 'all' && ann.type !== filter) continue;
-      const li = document.createElement('li');
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      const measurement = getAnnotationMeasurementLabel(ann);
-      btn.textContent = measurement ? `${ann.label || ann.type} (${measurement})` : (ann.label || ann.type);
-      btn.addEventListener('click', () => selectAnnotation(ann.id));
-      const del = document.createElement('button');
-      del.type = 'button';
-      del.textContent = '✕';
-      del.addEventListener('click', () => {
-        appState.annotations = appState.annotations.filter(a => a.id !== ann.id);
-        for (const layer of appState.layers) layer.children = layer.children.filter(id => id !== ann.id);
-        refreshAnnotationsPanel();
-        scheduleRedraw();
-      });
-      li.append(btn, del);
-      list.appendChild(li);
-    }
-  };
+    appState.viewport.zoom = newZoom;
+    appState.viewport.panX = cx - prev.x * newZoom;
+    appState.viewport.panY = cy - prev.y * newZoom;
 
-  const refreshUI = () => {
-    refreshLayersPanel();
-    refreshAnnotationsPanel();
-    if (appState.selection.ids.length) {
-      const ann = appState.annotations.find(a => a.id === appState.selection.ids[0]);
-      refreshPropertiesPanel(ann);
+    updateZoomStatus();
+    scheduleRedraw();
+  }
+
+  function updateStatusCoords(point) {
+    $('#status-coords').textContent = `x: ${formatNumber(point.x, 1)}, y: ${formatNumber(point.y, 1)}`;
+  }
+
+  function updateZoomStatus() {
+    $('#status-zoom').textContent = `Zoom: ${formatNumber(appState.viewport.zoom * 100, 0)}%`;
+  }
+
+  /* Drawing workflow */
+
+  function startDrawing(event) {
+    const base = {
+      id: createId('ann'),
+      type: appState.pointerMode,
+      layerId: 'base',
+      style: {
+        stroke: TOOL_DEFAULTS.stroke,
+        fill: TOOL_DEFAULTS.fill,
+        strokeWidth: TOOL_DEFAULTS.strokeWidth,
+        opacity: TOOL_DEFAULTS.opacity,
+        textColor: TOOL_DEFAULTS.textColor,
+        textSize: TOOL_DEFAULTS.textSize
+      }
+    };
+
+    const start = appState.dragStart;
+
+    switch (appState.pointerMode) {
+      case 'point':
+        appState.draft = {
+          ...base,
+          geometry: { x: start.x, y: start.y }
+        };
+        break;
+      case 'line':
+        appState.draft = {
+          ...base,
+          geometry: { start: { ...start }, end: { ...start } }
+        };
+        break;
+      case 'polyline':
+        appState.draft = {
+          ...base,
+          geometry: { points: [{ ...start }] }
+        };
+        break;
+      case 'rect':
+        appState.draft = {
+          ...base,
+          geometry: { x: start.x, y: start.y, width: 0, height: 0 }
+        };
+        break;
+      case 'ellipse':
+        appState.draft = {
+          ...base,
+          geometry: { x: start.x, y: start.y, width: 0, height: 0 }
+        };
+        break;
+      case 'polygon':
+        appState.draft = {
+          ...base,
+          geometry: { points: [{ ...start }] }
+        };
+        break;
+      case 'angle':
+        appState.draft = {
+          ...base,
+          geometry: { a: { ...start }, b: { ...start }, c: { ...start }, stage: 0 }
+        };
+        break;
+      case 'text': {
+        const content = prompt('Text content');
+        if (!content) {
+          appState.draft = null;
+          return;
+        }
+        appState.draft = {
+          ...base,
+          geometry: { position: { ...start }, content }
+        };
+        finishDrawing();
+        return;
+      }
+      default:
+        appState.draft = null;
+    }
+    scheduleRedraw();
+  }
+
+  function updateDraft(point) {
+    if (!appState.draft) return;
+    const draft = appState.draft;
+    switch (draft.type) {
+      case 'point':
+        draft.geometry = { x: point.x, y: point.y };
+        break;
+      case 'line':
+        draft.geometry.end = { ...point };
+        updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end));
+        break;
+      case 'polyline':
+        draft.geometry.points[draft.geometry.points.length - 1] = { ...point };
+        updatePolylineMeasurement(draft.geometry.points);
+        break;
+      case 'rect':
+        draft.geometry = normalizedRect(appState.dragStart, point);
+        updateMeasurementStatus(Math.abs(draft.geometry.width * draft.geometry.height));
+        break;
+      case 'ellipse':
+        draft.geometry = normalizedRect(appState.dragStart, point);
+        updateMeasurementStatus(Math.PI * Math.abs(draft.geometry.width / 2) * Math.abs(draft.geometry.height / 2));
+        break;
+      case 'polygon':
+        draft.geometry.points[draft.geometry.points.length - 1] = { ...point };
+        updateMeasurementStatus(polygonArea(draft.geometry.points));
+        break;
+      case 'angle':
+        if (draft.geometry.stage === 0) {
+          draft.geometry.b = { ...point };
+          updateMeasurementStatus(lengthBetween(draft.geometry.a, draft.geometry.b));
+        } else {
+          draft.geometry.c = { ...point };
+          updateMeasurementStatus(angleBetween(draft.geometry.a, draft.geometry.b, draft.geometry.c));
+        }
+        break;
+    }
+    scheduleRedraw();
+  }
+
+  function finishDrawing() {
+    if (!appState.draft) return;
+    const draft = appState.draft;
+    if (!validateDraft(draft)) {
+      toast('Incomplete annotation discarded');
+      appState.draft = null;
+      scheduleRedraw();
+      updateMeasurementStatus(null);
+      return;
+    }
+
+    commitAnnotation(draft);
+    appState.draft = null;
+    scheduleRedraw();
+    updateMeasurementStatus(null);
+  }
+
+  function validateDraft(draft) {
+    switch (draft.type) {
+      case 'line':
+        return lengthBetween(draft.geometry.start, draft.geometry.end) > 1;
+      case 'polyline':
+        return draft.geometry.points.length >= 2;
+      case 'polygon':
+        return draft.geometry.points.length >= 3;
+      case 'rect':
+      case 'ellipse':
+        return Math.abs(draft.geometry.width) > 1 && Math.abs(draft.geometry.height) > 1;
+      case 'angle':
+        return draft.geometry.stage === 1;
+      default:
+        return true;
+    }
+  }
+
+  function commitAnnotation(annotation) {
+    const ann = deepClone(annotation);
+    delete ann.geometry.stage;
+    appState.annotations.push(ann);
+    const baseLayer = appState.layers.find(layer => layer.id === 'base');
+    if (baseLayer) {
+      baseLayer.children.push(ann.id);
+    }
+    appState.selection = [ann.id];
+    pushHistory('Create annotation');
+    refreshUI();
+  }
+
+  function updatePolylineMeasurement(points) {
+    if (points.length < 2) {
+      updateMeasurementStatus(null);
+      return;
+    }
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += lengthBetween(points[i - 1], points[i]);
+    }
+    updateMeasurementStatus(total);
+  }
+
+  function updateMeasurementStatus(value) {
+    if (value == null) {
+      $('#status-measure').textContent = 'Length: –';
     } else {
-      refreshPropertiesPanel(null);
+      $('#status-measure').textContent = `Measure: ${formatNumber(value, 2)}`;
     }
-    document.getElementById('toggle-snap').setAttribute('aria-pressed', appState.settings.snap.enabled ? 'true' : 'false');
-    document.getElementById('toggle-snap').textContent = `Snap: ${appState.settings.snap.enabled ? 'On' : 'Off'}`;
-    document.getElementById('toggle-grid').setAttribute('aria-pressed', appState.perspectiveGrid.visible ? 'true' : 'false');
-  };
-  /* ========================================================
-     Persistence & Export
-     ======================================================== */
-  const exportProject = (includeImage = false) => {
-    const data = {
-      schemaVersion: SCHEMA_VERSION,
-      timestamp: Date.now(),
-      image: includeImage ? appState.image : { width: appState.image?.width, height: appState.image?.height },
-      viewport: appState.viewport,
-      settings: appState.settings,
-      calibration: appState.calibration,
-      vanishingPoints: appState.vanishingPoints,
-      perspectiveGrid: appState.perspectiveGrid,
-      guides: appState.guides,
-      layers: appState.layers,
-      annotations: appState.annotations
-    };
-    return data;
-  };
+  }
 
-  const importProject = (data, opts = { pushHistory: true, notify: false }) => {
-    if (!data) return;
-    if (data.schemaVersion && data.schemaVersion !== SCHEMA_VERSION) {
-      showToast('Project schema mismatch. Attempting migration…');
+  function normalizedRect(start, end) {
+    const x = Math.min(start.x, end.x);
+    const y = Math.min(start.y, end.y);
+    const width = Math.abs(start.x - end.x);
+    const height = Math.abs(start.y - end.y);
+    return { x, y, width, height };
+  }
+
+  /* Selection */
+
+  function handleSelectDown(event) {
+    const hit = hitTest(toCanvasCoords(event.clientX, event.clientY));
+    if (hit) {
+      if (!event.shiftKey) {
+        appState.selection = [hit.id];
+      } else if (!appState.selection.includes(hit.id)) {
+        appState.selection.push(hit.id);
+      }
+      appState.dragStart = toCanvasCoords(event.clientX, event.clientY);
+      appState.lastPointer = appState.dragStart;
+    } else {
+      appState.selection = [];
     }
-    appState.image = data.image || null;
-    appState.viewport = data.viewport || appState.viewport;
-    appState.settings = data.settings || appState.settings;
-    appState.calibration = data.calibration || null;
-    appState.vanishingPoints = data.vanishingPoints || [];
-    appState.perspectiveGrid = data.perspectiveGrid || appState.perspectiveGrid;
-    appState.guides = data.guides || [];
-    appState.layers = data.layers || appState.layers;
-    appState.annotations = (data.annotations || []).map(ann => {
-      const cloned = JSON.parse(JSON.stringify(ann));
-      const computed = computeAnnotationMeasurements(cloned);
-      cloned.computed = computed ? applyMeasurementStability({}, computed) : {};
-      return cloned;
-    });
-    appState.selection = { ids: [], bbox: null };
-    if (opts.pushHistory) pushHistory('import');
     refreshUI();
     scheduleRedraw();
-    if (opts.notify) showToast('Project imported');
-  };
+  }
 
-  const exportPNG = () => {
-    if (!appState.image?.element) {
-      showToast('Load an image before exporting.');
-      return;
+  function handleSelectMove(event, point) {
+    if (!appState.selection.length || !event.buttons) return;
+    const dx = point.x - appState.lastPointer.x;
+    const dy = point.y - appState.lastPointer.y;
+    if (!dx && !dy) return;
+    for (const id of appState.selection) {
+      const annotation = appState.annotations.find(a => a.id === id);
+      if (annotation) {
+        translateAnnotation(annotation, dx, dy);
+      }
     }
-    const { width, height } = appState.image;
-    const offscreen = document.createElement('canvas');
-    offscreen.width = width;
-    offscreen.height = height;
-    const offctx = offscreen.getContext('2d');
-    offctx.drawImage(appState.image.element, 0, 0, width, height);
-    for (const ann of appState.annotations) {
-      const layer = findLayerContaining(ann.id);
-      if (layer && !layer.visible) continue;
-      offctx.save();
-      offctx.lineWidth = ann.style.strokeWidth;
-      offctx.strokeStyle = ann.style.stroke;
-      offctx.fillStyle = ann.style.fill;
-      switch (ann.type) {
-        case 'line': {
-          const [a, b] = ann.geometry.points;
-          offctx.beginPath();
-          offctx.moveTo(a.x, a.y);
-          offctx.lineTo(b.x, b.y);
-          offctx.stroke();
-          break;
-        }
-        case 'polyline': {
-          offctx.beginPath();
-          ann.geometry.points.forEach((p, i) => i === 0 ? offctx.moveTo(p.x, p.y) : offctx.lineTo(p.x, p.y));
-          offctx.stroke();
-          break;
-        }
-        case 'rect': {
-          const { x, y, width, height } = ann.geometry;
-          const drawX = width >= 0 ? x : x + width;
-          const drawY = height >= 0 ? y : y + height;
-          const w = Math.abs(width);
-          const h = Math.abs(height);
-          offctx.fillRect(drawX, drawY, w, h);
-          offctx.strokeRect(drawX, drawY, w, h);
-          break;
-        }
-        case 'ellipse': {
-          const { cx, cy, rx, ry } = ann.geometry;
-          offctx.beginPath();
-          offctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-          offctx.fill();
-          offctx.stroke();
-          break;
-        }
-        case 'polygon': {
-          offctx.beginPath();
-          ann.geometry.rings.forEach((ring) => {
-            if (!ring.length) return;
-            offctx.moveTo(ring[0].x, ring[0].y);
-            for (let i = 1; i < ring.length; i++) offctx.lineTo(ring[i].x, ring[i].y);
-            offctx.closePath();
-          });
-          offctx.fill('evenodd');
-          offctx.stroke();
-          break;
-        }
-        case 'triangle': {
-          const pts = ann.geometry.points;
-          offctx.beginPath();
-          pts.forEach((p, i) => i === 0 ? offctx.moveTo(p.x, p.y) : offctx.lineTo(p.x, p.y));
-          offctx.closePath();
-          offctx.fill();
-          offctx.stroke();
-          break;
-        }
-        case 'angle': {
-          const { a, b, c } = ann.geometry;
-          offctx.beginPath();
-          offctx.moveTo(b.x, b.y);
-          offctx.lineTo(a.x, a.y);
-          offctx.moveTo(b.x, b.y);
-          offctx.lineTo(c.x, c.y);
-          offctx.stroke();
-          break;
-        }
-        case 'text': {
-          const { x, y, text, fontSize, fontFamily, fontWeight, color, background } = ann.geometry;
-          offctx.font = `${fontWeight || 400} ${(fontSize || 18)}px ${fontFamily || 'Inter, sans-serif'}`;
-          offctx.fillStyle = color || '#ffffff';
-          if (background) {
-            const metrics = offctx.measureText(text);
-            const pad = 4;
-            const width = metrics.width + pad * 2;
-            const height = (fontSize || 18) + pad * 2;
-            offctx.fillStyle = background;
-            offctx.fillRect(x - pad, y - (fontSize || 18) - pad, width, height);
-            offctx.fillStyle = color || '#ffffff';
-          }
-          offctx.fillText(text, x, y);
-          break;
+    appState.lastPointer = point;
+    scheduleRedraw();
+  }
+
+  function handleSelectUp(event) {
+    if (event.detail === 2) {
+      const hit = hitTest(toCanvasCoords(event.clientX, event.clientY));
+      if (hit && hit.type === 'text') {
+        const newText = prompt('Edit text', hit.geometry.content);
+        if (newText != null) {
+          hit.geometry.content = newText;
+          pushHistory('Edit text');
+          scheduleRedraw();
+          refreshUI();
         }
       }
-      drawMeasurementLabel(offctx, ann, { zoom: 1 });
-      offctx.restore();
+    }
+    pushHistory('Move annotations');
+  }
+
+  function translateAnnotation(annotation, dx, dy) {
+    switch (annotation.type) {
+      case 'point':
+        annotation.geometry.x += dx;
+        annotation.geometry.y += dy;
+        break;
+      case 'line':
+        annotation.geometry.start.x += dx;
+        annotation.geometry.start.y += dy;
+        annotation.geometry.end.x += dx;
+        annotation.geometry.end.y += dy;
+        break;
+      case 'polyline':
+      case 'polygon':
+        for (const p of annotation.geometry.points) {
+          p.x += dx;
+          p.y += dy;
+        }
+        break;
+      case 'rect':
+      case 'ellipse':
+        annotation.geometry.x += dx;
+        annotation.geometry.y += dy;
+        break;
+      case 'angle':
+        annotation.geometry.a.x += dx;
+        annotation.geometry.a.y += dy;
+        annotation.geometry.b.x += dx;
+        annotation.geometry.b.y += dy;
+        annotation.geometry.c.x += dx;
+        annotation.geometry.c.y += dy;
+        break;
+      case 'text':
+        annotation.geometry.position.x += dx;
+        annotation.geometry.position.y += dy;
+        break;
+    }
+  }
+
+  function hitTest(point) {
+    for (let i = appState.annotations.length - 1; i >= 0; i--) {
+      const annotation = appState.annotations[i];
+      if (!isAnnotationVisible(annotation.id)) continue;
+      const bounds = annotationBounds(annotation);
+      if (!bounds) continue;
+      if (
+        point.x >= bounds.x - 6 &&
+        point.x <= bounds.x + bounds.width + 6 &&
+        point.y >= bounds.y - 6 &&
+        point.y <= bounds.y + bounds.height + 6
+      ) {
+        return annotation;
+      }
+    }
+    return null;
+  }
+
+  /* ==========================================
+     Layers & Properties
+     ========================================== */
+
+  function refreshUI() {
+    refreshLayers();
+    refreshAnnotationsList();
+    refreshProperties();
+    updateUndoRedoButtons();
+  }
+
+  function refreshLayers() {
+    const list = $('#layer-list');
+    list.innerHTML = '';
+    for (const layer of appState.layers) {
+      const item = document.createElement('li');
+      item.className = 'layer-item';
+      item.dataset.id = layer.id;
+      const title = document.createElement('span');
+      title.textContent = layer.name;
+      item.appendChild(title);
+      const visBtn = document.createElement('button');
+      visBtn.textContent = layer.visible === false ? '👁‍🗨' : '👁';
+      visBtn.title = 'Toggle visibility';
+      visBtn.addEventListener('click', () => {
+        layer.visible = layer.visible === false ? true : false;
+        scheduleRedraw();
+        refreshUI();
+        pushHistory('Toggle layer');
+      });
+      item.appendChild(visBtn);
+      list.appendChild(item);
+    }
+  }
+
+  function refreshAnnotationsList() {
+    const list = $('#annotation-list');
+    list.innerHTML = '';
+    for (const annotation of appState.annotations) {
+      const item = document.createElement('li');
+      item.className = 'annotation-item';
+      item.dataset.id = annotation.id;
+      if (appState.selection.includes(annotation.id)) {
+        item.classList.add('selected');
+      }
+      const label = document.createElement('span');
+      label.textContent = `${annotation.type} (${annotation.id.slice(-4)})`;
+      item.appendChild(label);
+      const delBtn = document.createElement('button');
+      delBtn.textContent = '✕';
+      delBtn.title = 'Delete annotation';
+      delBtn.addEventListener('click', () => deleteAnnotation(annotation.id));
+      item.appendChild(delBtn);
+      item.addEventListener('click', () => {
+        appState.selection = [annotation.id];
+        scheduleRedraw();
+        refreshUI();
+      });
+      list.appendChild(item);
+    }
+  }
+
+  function refreshProperties() {
+    const panel = $('#properties-content');
+    panel.innerHTML = '';
+    if (appState.selection.length !== 1) {
+      panel.textContent = 'Select an annotation to edit its properties.';
+      return;
+    }
+    const annotation = appState.annotations.find(a => a.id === appState.selection[0]);
+    if (!annotation) {
+      panel.textContent = 'Select an annotation to edit its properties.';
+      return;
+    }
+
+    panel.appendChild(makeInput('Stroke color', 'color', annotation.style.stroke || '#000000', value => {
+      annotation.style.stroke = value;
+      scheduleRedraw();
+      scheduleAutosave();
+    }));
+
+    panel.appendChild(makeInput('Fill color', 'color', annotation.style.fill || '#000000', value => {
+      annotation.style.fill = value;
+      scheduleRedraw();
+      scheduleAutosave();
+    }));
+
+    panel.appendChild(makeInput('Stroke width', 'number', annotation.style.strokeWidth || 2, value => {
+      annotation.style.strokeWidth = Number(value);
+      scheduleRedraw();
+      scheduleAutosave();
+    }, { min: 1, max: 20 }));
+
+    panel.appendChild(makeInput('Opacity', 'range', annotation.style.opacity ?? 1, value => {
+      annotation.style.opacity = Number(value);
+      scheduleRedraw();
+      scheduleAutosave();
+    }, { min: 0.1, max: 1, step: 0.05 }));
+
+    if (annotation.type === 'text') {
+      panel.appendChild(makeInput('Text', 'text', annotation.geometry.content, value => {
+        annotation.geometry.content = value;
+        scheduleRedraw();
+        scheduleAutosave();
+      }));
+
+      panel.appendChild(makeInput('Text size', 'number', annotation.style.textSize || 16, value => {
+        annotation.style.textSize = Number(value);
+        scheduleRedraw();
+        scheduleAutosave();
+      }, { min: 8, max: 72 }));
+    }
+  }
+
+  function makeInput(labelText, type, value, onChange, attrs = {}) {
+    const wrapper = document.createElement('div');
+    const label = document.createElement('label');
+    label.textContent = labelText;
+    const input = document.createElement('input');
+    input.type = type;
+    input.value = value;
+    for (const [k, v] of Object.entries(attrs)) {
+      input[k] = v;
+    }
+    input.addEventListener('input', () => onChange(input.value));
+    wrapper.appendChild(label);
+    wrapper.appendChild(input);
+    return wrapper;
+  }
+
+  function deleteAnnotation(id) {
+    const index = appState.annotations.findIndex(a => a.id === id);
+    if (index === -1) return;
+    appState.annotations.splice(index, 1);
+    for (const layer of appState.layers) {
+      const idx = layer.children.indexOf(id);
+      if (idx !== -1) layer.children.splice(idx, 1);
+    }
+    appState.selection = [];
+    pushHistory('Delete annotation');
+    scheduleRedraw();
+    refreshUI();
+  }
+
+  /* ==========================================
+     Persistence & Export
+     ========================================== */
+
+  function exportPNG() {
+    if (!appState.image) {
+      toast('Load an image before exporting PNG');
+      return;
+    }
+    const offscreen = document.createElement('canvas');
+    offscreen.width = appState.image.width;
+    offscreen.height = appState.image.height;
+    const offCtx = offscreen.getContext('2d');
+    offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
+    offCtx.drawImage(appState.image, 0, 0);
+    for (const annotation of appState.annotations) {
+      if (!isAnnotationVisible(annotation.id)) continue;
+      drawAnnotationToContext(offCtx, annotation);
     }
     offscreen.toBlob(blob => {
       if (!blob) {
-        showToast('Export failed');
+        toast('Export failed');
         return;
       }
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'annotated.png';
+      a.download = 'annotation.png';
       a.click();
       URL.revokeObjectURL(url);
-      showToast('PNG export ready');
+      toast('PNG export complete');
     });
-  };
-  /* ========================================================
-     UI & Events
-     ======================================================== */
-  const imageLoader = document.getElementById('image-loader');
-  const projectLoader = document.getElementById('project-loader');
+  }
 
-  const openImagePicker = () => imageLoader.click();
-  const openProjectPicker = () => projectLoader.click();
+  function drawAnnotationToContext(context, annotation) {
+    context.save();
+    context.globalAlpha = annotation.style.opacity ?? 1;
+    context.lineWidth = annotation.style.strokeWidth || TOOL_DEFAULTS.strokeWidth;
+    context.strokeStyle = annotation.style.stroke || TOOL_DEFAULTS.stroke;
+    context.fillStyle = annotation.style.fill || TOOL_DEFAULTS.fill;
 
-  const applyExifOrientation = async (file) => {
-    const buffer = await file.arrayBuffer();
-    let orientation = 1;
-    try {
-      const view = new DataView(buffer);
-      if (view.getUint16(0, false) !== 0xFFD8) throw new Error('Not JPEG');
-      let offset = 2;
-      while (offset < view.byteLength) {
-        const marker = view.getUint16(offset, false);
-        offset += 2;
-        if (marker === 0xFFE1) {
-          const size = view.getUint16(offset, false);
-          offset += 2;
-          if (view.getUint32(offset, false) !== 0x45786966) break;
-          const little = view.getUint16(offset + 6, false) === 0x4949;
-          let dirOffset = view.getUint32(offset + 10, little);
-          if (dirOffset < 0x00000008) break;
-          const entries = view.getUint16(offset + 6 + dirOffset, little);
-          for (let i = 0; i < entries; i++) {
-            const entryOffset = offset + 8 + dirOffset + i * 12;
-            if (view.getUint16(entryOffset, little) === 0x0112) {
-              orientation = view.getUint16(entryOffset + 8, little);
-              break;
-            }
-          }
-          break;
-        } else if (marker === 0xFFDA) {
-          break;
-        } else {
-          offset += view.getUint16(offset, false);
-        }
-      }
-    } catch (err) {
-      console.warn('EXIF parse failed', err);
-    }
-    const blob = new Blob([buffer], { type: file.type });
-    const imageURL = URL.createObjectURL(blob);
-    const image = new Image();
-    image.src = imageURL;
-    await image.decode();
-    const canvasTmp = document.createElement('canvas');
-    const ctxTmp = canvasTmp.getContext('2d');
-    const { width, height } = image;
-    if (orientation > 4) {
-      canvasTmp.width = height;
-      canvasTmp.height = width;
-    } else {
-      canvasTmp.width = width;
-      canvasTmp.height = height;
-    }
-    ctxTmp.save();
-    switch (orientation) {
-      case 2: ctxTmp.scale(-1, 1); ctxTmp.translate(-width, 0); break;
-      case 3: ctxTmp.translate(width, height); ctxTmp.rotate(Math.PI); break;
-      case 4: ctxTmp.scale(1, -1); ctxTmp.translate(0, -height); break;
-      case 5: ctxTmp.rotate(0.5 * Math.PI); ctxTmp.scale(1, -1); break;
-      case 6: ctxTmp.rotate(0.5 * Math.PI); ctxTmp.translate(0, -height); break;
-      case 7: ctxTmp.rotate(0.5 * Math.PI); ctxTmp.translate(width, -height); ctxTmp.scale(-1, 1); break;
-      case 8: ctxTmp.rotate(-0.5 * Math.PI); ctxTmp.translate(-height, 0); break;
-      default: break;
-    }
-    ctxTmp.drawImage(image, 0, 0);
-    ctxTmp.restore();
-    const oriented = new Image();
-    oriented.src = canvasTmp.toDataURL(file.type);
-    await oriented.decode();
-    URL.revokeObjectURL(imageURL);
-    return oriented;
-  };
-
-  const loadImageFile = async (file) => {
-    const img = await applyExifOrientation(file);
-    appState.image = {
-      src: img.src,
-      width: img.width,
-      height: img.height,
-      exifRotation: 0,
-      element: img
-    };
-    fitToView();
-    pushHistory('load-image');
-    scheduleRedraw();
-  };
-
-  const fitToView = () => {
-    if (!appState.image) return;
-    const { width, height } = appState.viewport.viewSize;
-    const scale = Math.min(width / appState.image.width, height / appState.image.height);
-    appState.viewport.zoom = scale;
-    appState.viewport.pan = { x: (width - appState.image.width * scale) / 2, y: (height - appState.image.height * scale) / 2 };
-    scheduleRedraw();
-  };
-
-  const setZoom = (zoom, origin) => {
-    const { pan } = appState.viewport;
-    const oldZoom = appState.viewport.zoom;
-    const factor = zoom / oldZoom;
-    if (origin) {
-      pan.x = origin.x - (origin.x - pan.x) * factor;
-      pan.y = origin.y - (origin.y - pan.y) * factor;
-    }
-    appState.viewport.zoom = zoom;
-    scheduleRedraw();
-  };
-
-  const zoomAroundPoint = (delta, clientX, clientY) => {
-    const zoom = appState.viewport.zoom * (delta > 0 ? 0.9 : 1.1);
-    const clamped = clamp(zoom, 0.05, 10);
-    setZoom(clamped, { x: clientX, y: clientY });
-  };
-
-  const panCanvas = (dx, dy) => {
-    appState.viewport.pan.x += dx;
-    appState.viewport.pan.y += dy;
-    scheduleRedraw();
-  };
-
-  const handlePointerDown = (event) => {
-    if (event.button !== 0 && event.button !== 1) return;
-    event.preventDefault();
-    const point = toCanvasCoords(event.clientX, event.clientY);
-    appState.lastPointer = point;
-    const disableSnap = event.ctrlKey || event.metaKey;
-    const snapped = snapPoint(point.x, point.y, { disableSnap });
-    switch (activeTool) {
+    switch (annotation.type) {
+      case 'point':
+        context.beginPath();
+        context.arc(annotation.geometry.x, annotation.geometry.y, 4, 0, Math.PI * 2);
+        context.fill();
+        context.stroke();
+        break;
       case 'line':
-        appState.pendingAction = { tool: 'line', start: clonePoint(snapped), temp: clonePoint(snapped) };
-        scheduleRedraw();
+        context.beginPath();
+        context.moveTo(annotation.geometry.start.x, annotation.geometry.start.y);
+        context.lineTo(annotation.geometry.end.x, annotation.geometry.end.y);
+        context.stroke();
+        break;
+      case 'polyline':
+        context.beginPath();
+        annotation.geometry.points.forEach((pt, idx) => {
+          if (idx === 0) context.moveTo(pt.x, pt.y);
+          else context.lineTo(pt.x, pt.y);
+        });
+        context.stroke();
         break;
       case 'rect':
-        appState.pendingAction = { tool: 'rect', start: clonePoint(snapped), temp: clonePoint(snapped) };
-        scheduleRedraw();
+        context.beginPath();
+        context.rect(annotation.geometry.x, annotation.geometry.y, annotation.geometry.width, annotation.geometry.height);
+        context.fill();
+        context.stroke();
         break;
       case 'ellipse':
-        appState.pendingAction = { tool: 'ellipse', start: clonePoint(snapped), temp: clonePoint(snapped) };
-        scheduleRedraw();
+        context.beginPath();
+        context.ellipse(
+          annotation.geometry.x + annotation.geometry.width / 2,
+          annotation.geometry.y + annotation.geometry.height / 2,
+          Math.abs(annotation.geometry.width) / 2,
+          Math.abs(annotation.geometry.height) / 2,
+          0,
+          0,
+          Math.PI * 2
+        );
+        context.fill();
+        context.stroke();
         break;
-      case 'point':
-        createAnnotation('point', { x: snapped.x, y: snapped.y });
+      case 'polygon':
+        context.beginPath();
+        annotation.geometry.points.forEach((pt, idx) => {
+          if (idx === 0) context.moveTo(pt.x, pt.y);
+          else context.lineTo(pt.x, pt.y);
+        });
+        context.closePath();
+        context.fill();
+        context.stroke();
         break;
-      case 'polyline': {
-        let action = appState.pendingAction;
-        if (!action || action.tool !== 'polyline') {
-          action = { tool: 'polyline', points: [clonePoint(snapped)], temp: clonePoint(snapped), handlesPointerUp: false };
-          appState.pendingAction = action;
-        } else {
-          const last = action.points[action.points.length - 1];
-          if (dist(last.x, last.y, snapped.x, snapped.y) > 0.5) {
-            action.points.push(clonePoint(snapped));
-          }
-          action.temp = clonePoint(snapped);
-        }
-        if (event.detail > 1 && action.points.length >= 2) {
-          createAnnotation('polyline', { points: action.points.map(clonePoint) });
-          appState.pendingAction = null;
-        }
-        scheduleRedraw();
+      case 'angle':
+        context.beginPath();
+        context.moveTo(annotation.geometry.a.x, annotation.geometry.a.y);
+        context.lineTo(annotation.geometry.b.x, annotation.geometry.b.y);
+        context.lineTo(annotation.geometry.c.x, annotation.geometry.c.y);
+        context.stroke();
         break;
-      }
-      case 'polygon': {
-        let action = appState.pendingAction;
-        if (!action || action.tool !== 'polygon') {
-          action = { tool: 'polygon', points: [clonePoint(snapped)], temp: clonePoint(snapped), handlesPointerUp: false };
-          appState.pendingAction = action;
-        } else {
-          const last = action.points[action.points.length - 1];
-          if (dist(last.x, last.y, snapped.x, snapped.y) > 0.5) {
-            action.points.push(clonePoint(snapped));
-          }
-          action.temp = clonePoint(snapped);
-        }
-        const first = appState.pendingAction?.points?.[0];
-        const closeThreshold = 8 / appState.viewport.zoom;
-        if ((event.detail > 1 || (first && dist(first.x, first.y, snapped.x, snapped.y) <= closeThreshold)) && appState.pendingAction.points.length >= 3) {
-          const ring = appState.pendingAction.points.map(clonePoint);
-          if (dist(ring[0].x, ring[0].y, ring[ring.length - 1].x, ring[ring.length - 1].y) > 0.01) {
-            ring.push(clonePoint(ring[0]));
-          }
-          createAnnotation('polygon', { rings: [ring] });
-          appState.pendingAction = null;
-        }
-        scheduleRedraw();
-        break;
-      }
-      case 'triangle': {
-        let action = appState.pendingAction;
-        if (!action || action.tool !== 'triangle') {
-          action = { tool: 'triangle', points: [clonePoint(snapped)], temp: clonePoint(snapped), handlesPointerUp: false };
-          appState.pendingAction = action;
-        } else {
-          action.points.push(clonePoint(snapped));
-          action.temp = clonePoint(snapped);
-        }
-        if (appState.pendingAction.points.length === 3) {
-          createAnnotation('triangle', { points: appState.pendingAction.points.map(clonePoint) });
-          appState.pendingAction = null;
-        } else {
-          scheduleRedraw();
-        }
-        break;
-      }
-      case 'angle': {
-        let action = appState.pendingAction;
-        if (!action || action.tool !== 'angle') {
-          action = { tool: 'angle', points: [clonePoint(snapped)], temp: clonePoint(snapped), handlesPointerUp: false };
-          appState.pendingAction = action;
-        } else {
-          action.points.push(clonePoint(snapped));
-          action.temp = clonePoint(snapped);
-        }
-        if (appState.pendingAction.points.length === 3) {
-          const [a, b, c] = appState.pendingAction.points.map(clonePoint);
-          createAnnotation('angle', { a, b, c });
-          appState.pendingAction = null;
-        } else {
-          scheduleRedraw();
-        }
-        break;
-      }
-      case 'text': {
-        const value = window.prompt('Enter text');
-        if (value) {
-          createAnnotation('text', { x: snapped.x, y: snapped.y, text: value, fontSize: 24, fontFamily: 'Inter, sans-serif', fontWeight: 600, color: '#ffffff', background: 'rgba(0,0,0,0.5)' });
-        }
-        break;
-      }
-      case 'calibrate': {
-        let action = appState.pendingAction;
-        if (!action || action.tool !== 'calibrate') {
-          appState.pendingAction = { tool: 'calibrate', start: clonePoint(snapped), temp: clonePoint(snapped), handlesPointerUp: false };
-          scheduleRedraw();
-        } else {
-          const distancePx = dist(action.start.x, action.start.y, snapped.x, snapped.y);
-          if (distancePx < 1) {
-            showToast('Calibration distance too small');
-            appState.pendingAction = null;
-            scheduleRedraw();
-            break;
-          }
-          const input = window.prompt('Enter real-world distance with unit (e.g. 2.5 m or 8 in)', `${formatNumber(distancePx, 2)} ${appState.settings.units === 'imperial' ? 'in' : 'cm'}`);
-          const parsed = parseCalibrationInput(input || '');
-          if (!parsed) {
-            showToast('Calibration cancelled');
-            appState.pendingAction = null;
-            scheduleRedraw();
-            break;
-          }
-          appState.calibration = { scaleRatio: parsed.amount / distancePx, scaleUnit: parsed.unit };
-          showToast(`Calibrated: 1px = ${formatNumber(appState.calibration.scaleRatio, 4)} ${parsed.unit}`);
-          appState.pendingAction = null;
-          refreshUI();
-          scheduleRedraw();
-        }
-        break;
-      }
-      case 'vanish': {
-        const threshold = 12 / appState.viewport.zoom;
-        let nearest = null;
-        let best = Infinity;
-        for (const vp of appState.vanishingPoints) {
-          const d = dist(vp.x, vp.y, snapped.x, snapped.y);
-          if (d <= threshold && d < best) {
-            nearest = vp;
-            best = d;
-          }
-        }
-        if (nearest) {
-          appState.pendingAction = { tool: 'vanish-drag', id: nearest.id };
-        } else {
-          const roles = ['left', 'right', 'vertical'];
-          const role = roles[appState.vanishingPoints.length % roles.length];
-          const vp = { id: uuid(), x: snapped.x, y: snapped.y, role };
-          appState.vanishingPoints.push(vp);
-          appState.pendingAction = { tool: 'vanish-drag', id: vp.id };
-          showToast(`Vanishing point added (${role})`);
-        }
-        scheduleRedraw();
-        break;
-      }
-      case 'grid':
-        appState.perspectiveGrid.visible = !appState.perspectiveGrid.visible;
-        refreshUI();
-        scheduleRedraw();
-        setActiveTool('select');
-        break;
-      default:
-        if (activeTool === 'pan' || event.button === 1) {
-          appState.pendingAction = { tool: 'pan', start: { x: event.clientX, y: event.clientY } };
-        }
+      case 'text':
+        context.save();
+        context.font = `${annotation.style.textSize || TOOL_DEFAULTS.textSize}px/1.2 sans-serif`;
+        context.fillStyle = annotation.style.textColor || TOOL_DEFAULTS.textColor;
+        context.fillText(annotation.geometry.content, annotation.geometry.position.x, annotation.geometry.position.y);
+        context.restore();
         break;
     }
-  };
 
-  const handlePointerMove = (event) => {
-    const point = toCanvasCoords(event.clientX, event.clientY);
-    appState.lastPointer = point;
-    const action = appState.pendingAction;
-    if (!action) return;
-    if (action.tool === 'line' || action.tool === 'rect' || action.tool === 'ellipse' || action.tool === 'calibrate') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      action.temp = { x: snapped.x, y: snapped.y };
-      scheduleRedraw();
-    } else if (action.tool === 'polyline' || action.tool === 'polygon' || action.tool === 'triangle' || action.tool === 'angle') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      action.temp = { x: snapped.x, y: snapped.y };
-      scheduleRedraw();
-    } else if (action.tool === 'vanish-drag') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      const vp = appState.vanishingPoints.find(v => v.id === action.id);
-      if (vp) {
-        vp.x = snapped.x;
-        vp.y = snapped.y;
-        scheduleRedraw();
-      }
-    } else if (action.tool === 'pan') {
-      const dx = event.clientX - action.start.x;
-      const dy = event.clientY - action.start.y;
-      panCanvas(dx, dy);
-      action.start = { x: event.clientX, y: event.clientY };
-    }
-  };
+    context.restore();
+  }
 
-  const handlePointerUp = (event) => {
-    const point = toCanvasCoords(event.clientX, event.clientY);
-    const action = appState.pendingAction;
-    if (!action || action.handlesPointerUp === false) return;
-    if (action.tool === 'line') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      if (dist(action.start.x, action.start.y, snapped.x, snapped.y) > 0.5) {
-        createAnnotation('line', { points: [action.start, { x: snapped.x, y: snapped.y }] });
-      }
-    } else if (action.tool === 'rect') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      const x1 = action.start.x;
-      const y1 = action.start.y;
-      const x2 = snapped.x;
-      const y2 = snapped.y;
-      const width = Math.abs(x2 - x1);
-      const height = Math.abs(y2 - y1);
-      if (width > 0.5 && height > 0.5) {
-        createAnnotation('rect', { x: Math.min(x1, x2), y: Math.min(y1, y2), width, height });
-      }
-    } else if (action.tool === 'ellipse') {
-      const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      const rx = Math.abs(snapped.x - action.start.x) / 2;
-      const ry = Math.abs(snapped.y - action.start.y) / 2;
-      if (rx > 0.5 && ry > 0.5) {
-        const cx = (action.start.x + snapped.x) / 2;
-        const cy = (action.start.y + snapped.y) / 2;
-        createAnnotation('ellipse', { cx, cy, rx, ry });
-      }
-    }
-    appState.pendingAction = null;
-  };
-
-  const handleWheel = (event) => {
-    if (event.ctrlKey) {
-      event.preventDefault();
-      zoomAroundPoint(event.deltaY, event.clientX, event.clientY);
-    } else if (event.shiftKey) {
-      panCanvas(-event.deltaY, 0);
-    } else {
-      panCanvas(-event.deltaX, -event.deltaY);
-    }
-  };
-
-  const handleKeyDown = (event) => {
-    switch (event.key) {
-      case '1': setActiveTool('select'); break;
-      case '2': setActiveTool('pan'); break;
-      case '3': setActiveTool('line'); break;
-      case '5': setActiveTool('rect'); break;
-      case '6': setActiveTool('ellipse'); break;
-      case '7': setActiveTool('polygon'); break;
-      case '8': setActiveTool('angle'); break;
-      case '9': setActiveTool('triangle'); break;
-      case '0': setActiveTool('text'); break;
-      case 'Delete': deleteSelection(); break;
-      case 'Escape': selectAnnotation(null); break;
-    }
-    if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
-      event.preventDefault();
-      undo();
-    }
-    if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'z') {
-      event.preventDefault();
-      redo();
-    }
-  };
-
-  const setupMenus = () => {
-    document.querySelectorAll('.menu').forEach(menu => {
-      const button = menu.querySelector('button');
-      const list = menu.querySelector('.menu-list');
-      button.addEventListener('click', () => {
-        const expanded = menu.getAttribute('aria-expanded') === 'true';
-        closeAllMenus();
-        menu.setAttribute('aria-expanded', expanded ? 'false' : 'true');
-      });
-      menu.addEventListener('keydown', event => {
-        if (event.key === 'Escape') {
-          menu.setAttribute('aria-expanded', 'false');
-          button.focus();
-        }
-      });
-      list.querySelectorAll('button').forEach(item => {
-        item.addEventListener('click', handleMenuAction);
-      });
-    });
-    document.addEventListener('click', event => {
-      if (!event.target.closest('.menu')) closeAllMenus();
-    });
-  };
-
-  const closeAllMenus = () => {
-    document.querySelectorAll('.menu').forEach(menu => menu.setAttribute('aria-expanded', 'false'));
-  };
-
-  const handleMenuAction = (event) => {
-    const action = event.currentTarget.dataset.action;
-    switch (action) {
-      case 'open-image': confirmDiscardChanges().then(ok => ok && openImagePicker()); break;
-      case 'import-project': confirmDiscardChanges().then(ok => ok && openProjectPicker()); break;
-      case 'save-project': saveProject(); break;
-      case 'export-png': exportPNG(); break;
-      case 'export-svg': showToast('SVG export not implemented in this build'); break;
-      case 'view-fit': fitToView(); break;
-      case 'view-100': setZoom(1, appState.viewport.pan); break;
-      case 'view-actual': setZoom(appState.image ? appState.image.width / appState.viewport.viewSize.width : 1, appState.viewport.pan); break;
-      case 'units-metric': appState.settings.units = 'metric'; scheduleRedraw(); break;
-      case 'units-imperial': appState.settings.units = 'imperial'; scheduleRedraw(); break;
-      case 'settings-theme': toggleColorBlindPalette(); break;
-      case 'settings-ui-scale': adjustUiScale(); break;
-      case 'settings-stroke': adjustStrokeThickness(); break;
-      case 'help-cheatsheet': toggleCheatsheet(true); break;
-      case 'help-about': showToast('Image Annotator – Offline tool for perspective-aware markup'); break;
-    }
-    closeAllMenus();
-  };
-
-  const toggleColorBlindPalette = () => {
-    const useCvd = !appState.settings.theme.colorBlind;
-    appState.settings.theme.colorBlind = useCvd;
-    appState.settings.theme.axisColors = useCvd ? { ...GRID_COLORS_CVD } : { ...GRID_COLORS };
-    scheduleRedraw();
-  };
-
-  const adjustUiScale = () => {
-    const value = parseFloat(window.prompt('UI scale (0.5 – 2.0)', appState.settings.theme.uiScale));
-    if (!Number.isFinite(value)) return;
-    appState.settings.theme.uiScale = clamp(value, 0.5, 2);
-    document.documentElement.style.setProperty('font-size', `${14 * appState.settings.theme.uiScale}px`);
-  };
-
-  const adjustStrokeThickness = () => {
-    const value = parseFloat(window.prompt('Stroke thickness (px)', appState.settings.theme.strokePx));
-    if (!Number.isFinite(value)) return;
-    appState.settings.theme.strokePx = clamp(value, 0.2, 20);
-    scheduleRedraw();
-  };
-
-  const toggleCheatsheet = (show) => {
-    const panel = document.getElementById('cheatsheet');
-    panel.style.display = show ? 'flex' : 'none';
-  };
-
-  const saveProject = () => {
-    const data = exportProject(false);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  function exportProjectJSON() {
+    const payload = serializeState();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'image-annotator-project.json';
+    a.download = 'project.json';
     a.click();
     URL.revokeObjectURL(url);
-    showToast('Project JSON downloaded');
-    updateDirtyFlag(false);
-  };
+    toast('Project JSON exported');
+  }
 
-  imageLoader.addEventListener('change', async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    await loadImageFile(file);
-    event.target.value = '';
-  });
+  function importProjectJSON(file) {
+    file.text().then(text => {
+      try {
+        const payload = JSON.parse(text);
+        if (!payload || payload.schemaVersion !== SCHEMA_VERSION) {
+          throw new Error('Unsupported project format');
+        }
+        restoreSnapshot(payload);
+        pushHistory('Import project');
+        toast('Project loaded');
+      } catch (err) {
+        console.error(err);
+        toast('Failed to load project');
+      }
+    });
+  }
 
-  projectLoader.addEventListener('change', async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    importProject(JSON.parse(text), { pushHistory: true, notify: true });
-    event.target.value = '';
-  });
-
-  document.getElementById('toggle-snap').addEventListener('click', () => {
-    appState.settings.snap.enabled = !appState.settings.snap.enabled;
-    refreshUI();
+  function resetCanvas() {
+    appState.image = null;
+    appState.viewport.zoom = 1;
+    appState.viewport.panX = 0;
+    appState.viewport.panY = 0;
+    appState.annotations = [];
+    appState.layers = [{ id: 'base', name: 'Annotations', visible: true, locked: false, children: [] }];
+    appState.selection = [];
+    appState.draft = null;
+    appState.history = { stack: [], index: -1 };
+    localStorage.removeItem(AUTOSAVE_KEY);
     scheduleRedraw();
-  });
-
-  document.getElementById('toggle-grid').addEventListener('click', () => {
-    appState.perspectiveGrid.visible = !appState.perspectiveGrid.visible;
     refreshUI();
+    toast('Canvas reset');
+  }
+
+  /* ==========================================
+     Image Loading
+     ========================================== */
+
+  function loadImage(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        appState.image = img;
+        appState.viewport.zoom = 1;
+        appState.viewport.panX = 0;
+        appState.viewport.panY = 0;
+        fitImage();
+        scheduleRedraw();
+        pushHistory('Load image');
+        toast('Image loaded');
+      };
+      img.src = reader.result;
+    };
+    reader.onerror = () => toast('Failed to read image');
+    reader.readAsDataURL(file);
+  }
+
+  function fitImage() {
+    if (!appState.image) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = (rect.width * appState.viewport.dpr) / appState.image.width;
+    const scaleY = (rect.height * appState.viewport.dpr) / appState.image.height;
+    const zoom = Math.min(scaleX, scaleY);
+    appState.viewport.zoom = zoom;
+    appState.viewport.panX = (canvas.width - appState.image.width * zoom) / 2;
+    appState.viewport.panY = (canvas.height - appState.image.height * zoom) / 2;
+    updateZoomStatus();
     scheduleRedraw();
-  });
+  }
 
-  $$('#tool-column .tool-button').forEach(btn => {
-    btn.addEventListener('click', () => setActiveTool(btn.dataset.tool));
-  });
+  function setViewPreset(preset) {
+    if (!appState.image) {
+      toast('Load an image first');
+      return;
+    }
+    switch (preset) {
+      case 'fit':
+        fitImage();
+        break;
+      case 'fill': {
+        const rect = canvas.getBoundingClientRect();
+        const zoom = Math.max(
+          (rect.width * appState.viewport.dpr) / appState.image.width,
+          (rect.height * appState.viewport.dpr) / appState.image.height
+        );
+        appState.viewport.zoom = zoom;
+        appState.viewport.panX = (canvas.width - appState.image.width * zoom) / 2;
+        appState.viewport.panY = (canvas.height - appState.image.height * zoom) / 2;
+        break;
+      }
+      case '100':
+        appState.viewport.zoom = 1;
+        appState.viewport.panX = (canvas.width - appState.image.width) / 2;
+        appState.viewport.panY = (canvas.height - appState.image.height) / 2;
+        break;
+      case 'actual':
+        appState.viewport.zoom = window.devicePixelRatio || 1;
+        appState.viewport.panX = (canvas.width - appState.image.width * appState.viewport.zoom) / 2;
+        appState.viewport.panY = (canvas.height - appState.image.height * appState.viewport.zoom) / 2;
+        break;
+    }
+    updateZoomStatus();
+    scheduleRedraw();
+  }
 
-  document.getElementById('canvas-wrapper').addEventListener('pointerdown', handlePointerDown);
-  document.getElementById('canvas-wrapper').addEventListener('pointermove', handlePointerMove);
-  document.getElementById('canvas-wrapper').addEventListener('pointerup', handlePointerUp);
-  document.getElementById('canvas-wrapper').addEventListener('wheel', handleWheel, { passive: false });
+  /* ==========================================
+     Draft multi-stage completion
+     ========================================== */
 
-  document.addEventListener('keydown', handleKeyDown);
-  document.querySelector('[data-action="close-cheatsheet"]').addEventListener('click', () => toggleCheatsheet(false));
-
-  const dragOverlay = document.getElementById('drag-overlay');
-  const showDragOverlay = (show) => {
-    dragOverlay.style.display = show ? 'flex' : 'none';
-  };
-
-  window.addEventListener('dragover', event => {
-    event.preventDefault();
-    showDragOverlay(true);
-  });
-
-  window.addEventListener('dragleave', event => {
-    if (!event.relatedTarget) showDragOverlay(false);
-  });
-
-  window.addEventListener('drop', async (event) => {
-    event.preventDefault();
-    showDragOverlay(false);
-    const file = event.dataTransfer?.files?.[0];
-    if (!file) return;
-    if (file.type.startsWith('image/')) {
-      await loadImageFile(file);
-    } else if (file.type === 'application/json') {
-      const text = await file.text();
-      importProject(JSON.parse(text), { pushHistory: true, notify: true });
+  canvas.addEventListener('dblclick', event => {
+    if (!appState.draft) return;
+    if (['polyline', 'polygon'].includes(appState.draft.type)) {
+      finishDrawing();
     }
   });
 
-  window.addEventListener('resize', fitCanvasToContainer);
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') autosave();
+  canvas.addEventListener('click', event => {
+    if (!appState.draft) return;
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    if (appState.draft.type === 'polyline' || appState.draft.type === 'polygon') {
+      appState.draft.geometry.points.push(point);
+      scheduleRedraw();
+    } else if (appState.draft.type === 'angle') {
+      if (appState.draft.geometry.stage === 0) {
+        appState.draft.geometry.b = point;
+        appState.draft.geometry.stage = 1;
+      } else {
+        appState.draft.geometry.c = point;
+        finishDrawing();
+      }
+      scheduleRedraw();
+    }
   });
 
-  const boot = () => {
+  /* ==========================================
+     Tabs & UI
+     ========================================== */
+
+  function setupTabs() {
+    const buttons = $$('aside .tabs button');
+    buttons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        buttons.forEach(b => {
+          b.classList.toggle('active', b === btn);
+          b.setAttribute('aria-selected', b === btn);
+        });
+        $$('.panel').forEach(panel => {
+          panel.classList.toggle('active', panel.id === `${btn.dataset.tab}-panel`);
+        });
+      });
+    });
+  }
+
+  /* ==========================================
+     Event Wiring
+     ========================================== */
+
+  function setupEvents() {
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    canvas.addEventListener('pointerdown', beginPointer);
+    canvas.addEventListener('pointermove', movePointer);
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', cancelPointer);
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+
+    document.addEventListener('keydown', event => {
+      if (event.target && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) return;
+      if (event.key === 'z' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        if (event.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+      }
+      if (event.key >= '0' && event.key <= '9') {
+        const index = event.key === '0' ? 9 : Number(event.key) - 1;
+        const tool = TOOL_ORDER[index];
+        if (tool) setTool(tool);
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (appState.selection.length) {
+          for (const id of [...appState.selection]) {
+            deleteAnnotation(id);
+          }
+        }
+      }
+    });
+
+    $('#undo-btn').addEventListener('click', undo);
+    $('#redo-btn').addEventListener('click', redo);
+
+    $('#tool-palette').addEventListener('click', event => {
+      if (event.target.tagName !== 'BUTTON') return;
+      setTool(event.target.dataset.tool);
+    });
+
+    $('#snap-toggle').addEventListener('change', event => {
+      appState.settings.snapEnabled = event.target.checked;
+      scheduleAutosave();
+    });
+
     setupMenus();
-    fitCanvasToContainer();
+    setupTabs();
+    setupDragAndDrop();
+  }
+
+  function setupMenus() {
+    $$('header .menu').forEach(menu => {
+      const trigger = menu.querySelector('.menu-trigger');
+      trigger.addEventListener('click', () => {
+        const expanded = menu.getAttribute('aria-expanded') === 'true';
+        closeMenus();
+        menu.setAttribute('aria-expanded', (!expanded).toString());
+      });
+      menu.querySelectorAll('.menu-content button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          handleMenuAction(btn.dataset.action, btn.dataset.view);
+          closeMenus();
+        });
+      });
+    });
+
+    document.addEventListener('click', event => {
+      if (!event.target.closest('.menu')) {
+        closeMenus();
+      }
+    });
+  }
+
+  function closeMenus() {
+    $$('header .menu').forEach(menu => menu.setAttribute('aria-expanded', 'false'));
+  }
+
+  function handleMenuAction(action, viewPreset) {
+    switch (action) {
+      case 'open-image':
+        $('#hidden-image-input').click();
+        break;
+      case 'save-project':
+        exportProjectJSON();
+        break;
+      case 'load-project':
+        $('#hidden-project-input').click();
+        break;
+      case 'export-png':
+        exportPNG();
+        break;
+      case 'reset':
+        resetCanvas();
+        break;
+      default:
+        if (viewPreset) {
+          setViewPreset(viewPreset);
+        }
+    }
+  }
+
+  function setupDragAndDrop() {
+    ['dragenter', 'dragover'].forEach(evt => {
+      canvas.addEventListener(evt, event => {
+        event.preventDefault();
+      });
+    });
+    canvas.addEventListener('drop', event => {
+      event.preventDefault();
+      const file = Array.from(event.dataTransfer.files).find(f => f.type.startsWith('image/'));
+      if (file) loadImage(file);
+    });
+
+    $('#hidden-image-input').addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      if (file) loadImage(file);
+      event.target.value = '';
+    });
+
+    $('#hidden-project-input').addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      if (file) importProjectJSON(file);
+      event.target.value = '';
+    });
+  }
+
+  /* ==========================================
+     Autosave recovery
+     ========================================== */
+
+  function recoverAutosave() {
+    const saved = localStorage.getItem(AUTOSAVE_KEY);
+    if (!saved) return;
+    try {
+      const payload = JSON.parse(saved);
+      if (payload && payload.schemaVersion === SCHEMA_VERSION) {
+        restoreSnapshot(payload);
+        toast('Session restored from autosave');
+      }
+    } catch (err) {
+      console.error('Autosave recovery failed', err);
+    }
+  }
+
+  /* ==========================================
+     Boot
+     ========================================== */
+
+  function boot() {
+    setupEvents();
+    recoverAutosave();
     refreshUI();
-    startAutosave();
-    loadAutosave();
+    updateZoomStatus();
     scheduleRedraw();
-  };
+  }
 
-  return { boot };
+  document.addEventListener('DOMContentLoaded', boot);
 })();
-
-window.addEventListener('DOMContentLoaded', () => App.boot());
 </script>
 </body>
 </html>
