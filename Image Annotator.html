@@ -754,10 +754,14 @@ const App = (() => {
         }
         case 'rect': {
           const { x, y, width, height } = ann.geometry;
-          candidates.push({ x, y, kind: 'corner' });
-          candidates.push({ x: x + width, y, kind: 'corner' });
-          candidates.push({ x: x + width, y: y + height, kind: 'corner' });
-          candidates.push({ x, y: y + height, kind: 'corner' });
+          const left = width >= 0 ? x : x + width;
+          const top = height >= 0 ? y : y + height;
+          const right = left + Math.abs(width);
+          const bottom = top + Math.abs(height);
+          candidates.push({ x: left, y: top, kind: 'corner' });
+          candidates.push({ x: right, y: top, kind: 'corner' });
+          candidates.push({ x: right, y: bottom, kind: 'corner' });
+          candidates.push({ x: left, y: bottom, kind: 'corner' });
           break;
         }
         case 'ellipse': {
@@ -950,15 +954,60 @@ const App = (() => {
     }
     return area / 2;
   };
+  const polygonCentroid = (points) => {
+    if (!points?.length) return null;
+    let areaAcc = 0;
+    let cxAcc = 0;
+    let cyAcc = 0;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+      const p0 = points[j];
+      const p1 = points[i];
+      const cross = p0.x * p1.y - p1.x * p0.y;
+      areaAcc += cross;
+      cxAcc += (p0.x + p1.x) * cross;
+      cyAcc += (p0.y + p1.y) * cross;
+    }
+    const area = areaAcc / 2;
+    if (Math.abs(area) < 1e-6) {
+      if (points.length === 1) return { x: points[0].x, y: points[0].y };
+      const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+      return { x: sum.x / points.length, y: sum.y / points.length };
+    }
+    const factor = 1 / (6 * area);
+    return { x: cxAcc * factor, y: cyAcc * factor };
+  };
+  const applyMeasurementStability = (prev = {}, next = {}) => {
+    const result = { ...next };
+    if (prev.length != null && next.length != null) {
+      const threshold = Math.pow(10, -appState.settings.precision.lengthDp);
+      if (Math.abs(next.length - prev.length) < threshold) result.length = prev.length;
+    }
+    if (prev.area != null && next.area != null) {
+      const threshold = Math.pow(10, -appState.settings.precision.areaDp);
+      if (Math.abs(next.area - prev.area) < threshold) result.area = prev.area;
+    }
+    if (prev.angle != null && next.angle != null) {
+      const threshold = Math.pow(10, -appState.settings.precision.angleDp);
+      if (Math.abs(next.angle - prev.angle) < threshold) result.angle = prev.angle;
+    }
+    if (prev.length != null && result.length == null) result.length = prev.length;
+    if (prev.area != null && result.area == null) result.area = prev.area;
+    if (prev.angle != null && result.angle == null) result.angle = prev.angle;
+    if (prev.lengthUnit && !result.lengthUnit) result.lengthUnit = prev.lengthUnit;
+    if (prev.areaUnit && !result.areaUnit) result.areaUnit = prev.areaUnit;
+    if (prev.angleUnit && !result.angleUnit) result.angleUnit = prev.angleUnit;
+    return result;
+  };
   const computeAnnotationMeasurements = (annotation) => {
     const { geometry, type } = annotation;
     const scaleRatio = appState.calibration?.scaleRatio || 1;
     const unit = appState.calibration?.scaleUnit || 'px';
+    const areaUnit = unit === 'px' ? 'px²' : `${unit}²`;
     switch (type) {
       case 'line': {
         const [a, b] = geometry.points;
         if (!a || !b) return null;
-        return { length: dist(a.x, a.y, b.x, b.y) * scaleRatio, unit };
+        return { length: dist(a.x, a.y, b.x, b.y) * scaleRatio, lengthUnit: unit };
       }
       case 'polyline': {
         let length = 0;
@@ -967,18 +1016,23 @@ const App = (() => {
           const p2 = geometry.points[i + 1];
           length += dist(p1.x, p1.y, p2.x, p2.y);
         }
-        return { length: length * scaleRatio, unit };
+        return { length: length * scaleRatio, lengthUnit: unit };
       }
       case 'rect': {
         const { width, height } = geometry;
         const length = Math.hypot(width, height);
         const area = Math.abs(width * height);
-        return { length: length * scaleRatio, area: area * scaleRatio * scaleRatio, unit };
+        return {
+          length: length * scaleRatio,
+          area: area * scaleRatio * scaleRatio,
+          lengthUnit: unit,
+          areaUnit
+        };
       }
       case 'ellipse': {
         const { rx, ry } = geometry;
         const area = Math.PI * rx * ry;
-        return { area: area * scaleRatio * scaleRatio, unit };
+        return { area: area * scaleRatio * scaleRatio, areaUnit };
       }
       case 'polygon':
       case 'triangle': {
@@ -986,7 +1040,7 @@ const App = (() => {
         const holes = geometry.rings ? geometry.rings.slice(1) : [];
         let area = polygonArea(mainRing);
         for (const hole of holes) area -= polygonArea(hole);
-        return { area: Math.abs(area) * scaleRatio * scaleRatio, unit };
+        return { area: Math.abs(area) * scaleRatio * scaleRatio, areaUnit };
       }
       case 'angle': {
         const { a, b, c } = geometry;
@@ -995,7 +1049,7 @@ const App = (() => {
         const dot = ab.x * cb.x + ab.y * cb.y;
         const mag = Math.hypot(ab.x, ab.y) * Math.hypot(cb.x, cb.y);
         const angle = mag === 0 ? 0 : Math.acos(clamp(dot / mag, -1, 1));
-        return { angle: radToDeg(angle), unit: '°' };
+        return { angle: radToDeg(angle), angleUnit: '°' };
       }
       default:
         return null;
@@ -1010,8 +1064,15 @@ const App = (() => {
         const ys = ann.geometry.points.map(p => p.y);
         return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
       }
-      case 'rect':
-        return { x: ann.geometry.x, y: ann.geometry.y, w: ann.geometry.width, h: ann.geometry.height };
+      case 'rect': {
+        const { x, y, width, height } = ann.geometry;
+        return {
+          x: width >= 0 ? x : x + width,
+          y: height >= 0 ? y : y + height,
+          w: Math.abs(width),
+          h: Math.abs(height)
+        };
+      }
       case 'ellipse':
         return { x: ann.geometry.cx - ann.geometry.rx, y: ann.geometry.cy - ann.geometry.ry, w: ann.geometry.rx * 2, h: ann.geometry.ry * 2 };
       case 'polygon':
@@ -1035,6 +1096,99 @@ const App = (() => {
       default:
         return null;
     }
+  };
+  const getAnnotationMeasurementLabel = (annotation) => {
+    if (!annotation?.computed) return '';
+    if (annotation.computed.length != null) {
+      return formatMeasurement('length', annotation.computed.length, annotation.computed.lengthUnit);
+    }
+    if (annotation.computed.area != null) {
+      return formatMeasurement('area', annotation.computed.area, annotation.computed.areaUnit);
+    }
+    if (annotation.computed.angle != null) {
+      return formatMeasurement('angle', annotation.computed.angle, annotation.computed.angleUnit || '°');
+    }
+    return '';
+  };
+  const averagePoints = (points) => {
+    if (!points?.length) return null;
+    const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+    return { x: sum.x / points.length, y: sum.y / points.length };
+  };
+  const getAnnotationLabelPosition = (annotation, zoom = appState.viewport.zoom) => {
+    switch (annotation.type) {
+      case 'line': {
+        const [a, b] = annotation.geometry.points;
+        if (!a || !b) return null;
+        return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      }
+      case 'polyline':
+        return averagePoints(annotation.geometry.points);
+      case 'rect': {
+        const { x, y, width, height } = annotation.geometry;
+        return { x: x + width / 2, y: y + height / 2 };
+      }
+      case 'ellipse': {
+        const { cx, cy } = annotation.geometry;
+        return { x: cx, y: cy };
+      }
+      case 'polygon': {
+        const ring = annotation.geometry.rings?.[0] || [];
+        if (!ring.length) return null;
+        const clean = [...ring];
+        if (clean.length > 1 && clean[0].x === clean[clean.length - 1].x && clean[0].y === clean[clean.length - 1].y) {
+          clean.pop();
+        }
+        return polygonCentroid(clean) || averagePoints(clean);
+      }
+      case 'triangle':
+        return averagePoints(annotation.geometry.points);
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        if (!a || !b || !c) return null;
+        const norm = (vx, vy) => {
+          const len = Math.hypot(vx, vy);
+          return len ? { x: vx / len, y: vy / len } : null;
+        };
+        const ab = norm(a.x - b.x, a.y - b.y);
+        const cb = norm(c.x - b.x, c.y - b.y);
+        if (!ab || !cb) return { x: b.x, y: b.y };
+        let dir = { x: ab.x + cb.x, y: ab.y + cb.y };
+        const mag = Math.hypot(dir.x, dir.y);
+        if (mag < 1e-6) {
+          dir = { x: -ab.y, y: ab.x };
+        } else {
+          dir.x /= mag;
+          dir.y /= mag;
+        }
+        const offset = 32 / zoom;
+        return { x: b.x + dir.x * offset, y: b.y + dir.y * offset };
+      }
+      default:
+        return null;
+    }
+  };
+  const drawMeasurementLabel = (context, annotation, opts = {}) => {
+    const zoom = opts.zoom ?? appState.viewport.zoom;
+    const text = getAnnotationMeasurementLabel(annotation);
+    if (!text) return;
+    const position = getAnnotationLabelPosition(annotation, zoom);
+    if (!position) return;
+    const fontSize = 12 / zoom;
+    const pad = 4 / zoom;
+    context.save();
+    context.font = `600 ${fontSize}px Inter, sans-serif`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.globalAlpha = 1;
+    const metrics = context.measureText(text);
+    const width = metrics.width + pad * 2;
+    const height = fontSize + pad * 2;
+    context.fillStyle = 'rgba(0,0,0,0.65)';
+    context.fillRect(position.x - width / 2, position.y - height / 2, width, height);
+    context.fillStyle = '#ffffff';
+    context.fillText(text, position.x, position.y);
+    context.restore();
   };
   /* ========================================================
      Rendering
@@ -1153,7 +1307,15 @@ const App = (() => {
       context.lineTo(action.temp.x, action.temp.y);
       context.stroke();
     } else if (action.tool === 'rect' && action.start && action.temp) {
-      context.strokeRect(action.start.x, action.start.y, action.temp.x - action.start.x, action.temp.y - action.start.y);
+      const x1 = action.start.x;
+      const y1 = action.start.y;
+      const x2 = action.temp.x;
+      const y2 = action.temp.y;
+      const x = Math.min(x1, x2);
+      const y = Math.min(y1, y2);
+      const w = Math.abs(x2 - x1);
+      const h = Math.abs(y2 - y1);
+      context.strokeRect(x, y, w, h);
     } else if (action.tool === 'ellipse' && action.start && action.temp) {
       const rx = Math.abs(action.temp.x - action.start.x) / 2;
       const ry = Math.abs(action.temp.y - action.start.y) / 2;
@@ -1239,8 +1401,12 @@ const App = (() => {
         }
         case 'rect': {
           const { x, y, width, height } = ann.geometry;
-          context.fillRect(x, y, width, height);
-          context.strokeRect(x, y, width, height);
+          const drawX = width >= 0 ? x : x + width;
+          const drawY = height >= 0 ? y : y + height;
+          const w = Math.abs(width);
+          const h = Math.abs(height);
+          context.fillRect(drawX, drawY, w, h);
+          context.strokeRect(drawX, drawY, w, h);
           break;
         }
         case 'ellipse': {
@@ -1252,13 +1418,15 @@ const App = (() => {
           break;
         }
         case 'polygon': {
-          ann.geometry.rings.forEach((ring, idx) => {
-            context.beginPath();
-            ring.forEach((p, i) => i === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y));
+          context.beginPath();
+          ann.geometry.rings.forEach((ring) => {
+            if (!ring.length) return;
+            context.moveTo(ring[0].x, ring[0].y);
+            for (let i = 1; i < ring.length; i++) context.lineTo(ring[i].x, ring[i].y);
             context.closePath();
-            if (idx === 0) context.fill('evenodd');
-            context.stroke();
           });
+          context.fill('evenodd');
+          context.stroke();
           break;
         }
         case 'triangle': {
@@ -1300,6 +1468,7 @@ const App = (() => {
           break;
         }
       }
+      drawMeasurementLabel(context, ann);
       context.restore();
     }
   };
@@ -1351,11 +1520,8 @@ const App = (() => {
     zoomEl.textContent = `${Math.round(appState.viewport.zoom * 100)}%`;
     if (appState.selection.ids.length) {
       const ann = appState.annotations.find(a => a.id === appState.selection.ids[0]);
-      if (ann?.computed) {
-        if (ann.computed.length) measureEl.textContent = formatMeasurement('length', ann.computed.length, appState.calibration?.scaleUnit);
-        else if (ann.computed.area) measureEl.textContent = formatMeasurement('area', ann.computed.area, appState.calibration?.scaleUnit ? `${appState.calibration.scaleUnit}²` : undefined);
-        else if (ann.computed.angle) measureEl.textContent = formatMeasurement('angle', ann.computed.angle, '°');
-      } else measureEl.textContent = '—';
+      const measurement = ann ? getAnnotationMeasurementLabel(ann) : '';
+      measureEl.textContent = measurement || '—';
     } else measureEl.textContent = '—';
     snapEl.textContent = `Snap: ${appState.settings.snap.enabled ? 'On' : 'Off'}`;
   };
@@ -1405,7 +1571,8 @@ const App = (() => {
       label: `${type} ${appState.annotations.length + 1}`,
       computed: {}
     };
-    annotation.computed = computeAnnotationMeasurements(annotation) || {};
+    const computed = computeAnnotationMeasurements(annotation);
+    annotation.computed = computed ? applyMeasurementStability({}, computed) : {};
     appState.annotations.push(annotation);
     const layer = getActiveLayer();
     if (layer) layer.children.push(annotation.id);
@@ -1420,7 +1587,8 @@ const App = (() => {
     const annotation = appState.annotations.find(a => a.id === id);
     if (!annotation) return;
     annotation.geometry = geometry;
-    annotation.computed = computeAnnotationMeasurements(annotation) || {};
+    const computed = computeAnnotationMeasurements(annotation);
+    annotation.computed = computed ? applyMeasurementStability(annotation.computed, computed) : {};
     appState.selection.bbox = computeBoundingBox(annotation);
     pushHistory(`update-${annotation.type}`);
     scheduleRedraw();
@@ -1555,7 +1723,8 @@ const App = (() => {
       const li = document.createElement('li');
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.textContent = ann.label || ann.type;
+      const measurement = getAnnotationMeasurementLabel(ann);
+      btn.textContent = measurement ? `${ann.label || ann.type} (${measurement})` : (ann.label || ann.type);
       btn.addEventListener('click', () => selectAnnotation(ann.id));
       const del = document.createElement('button');
       del.type = 'button';
@@ -1617,7 +1786,12 @@ const App = (() => {
     appState.perspectiveGrid = data.perspectiveGrid || appState.perspectiveGrid;
     appState.guides = data.guides || [];
     appState.layers = data.layers || appState.layers;
-    appState.annotations = data.annotations || [];
+    appState.annotations = (data.annotations || []).map(ann => {
+      const cloned = JSON.parse(JSON.stringify(ann));
+      const computed = computeAnnotationMeasurements(cloned);
+      cloned.computed = computed ? applyMeasurementStability({}, computed) : {};
+      return cloned;
+    });
     appState.selection = { ids: [], bbox: null };
     if (opts.pushHistory) pushHistory('import');
     refreshUI();
@@ -1660,8 +1834,12 @@ const App = (() => {
         }
         case 'rect': {
           const { x, y, width, height } = ann.geometry;
-          offctx.fillRect(x, y, width, height);
-          offctx.strokeRect(x, y, width, height);
+          const drawX = width >= 0 ? x : x + width;
+          const drawY = height >= 0 ? y : y + height;
+          const w = Math.abs(width);
+          const h = Math.abs(height);
+          offctx.fillRect(drawX, drawY, w, h);
+          offctx.strokeRect(drawX, drawY, w, h);
           break;
         }
         case 'ellipse': {
@@ -1673,13 +1851,15 @@ const App = (() => {
           break;
         }
         case 'polygon': {
-          ann.geometry.rings.forEach((ring, idx) => {
-            offctx.beginPath();
-            ring.forEach((p, i) => i === 0 ? offctx.moveTo(p.x, p.y) : offctx.lineTo(p.x, p.y));
+          offctx.beginPath();
+          ann.geometry.rings.forEach((ring) => {
+            if (!ring.length) return;
+            offctx.moveTo(ring[0].x, ring[0].y);
+            for (let i = 1; i < ring.length; i++) offctx.lineTo(ring[i].x, ring[i].y);
             offctx.closePath();
-            if (idx === 0) offctx.fill('evenodd');
-            offctx.stroke();
           });
+          offctx.fill('evenodd');
+          offctx.stroke();
           break;
         }
         case 'triangle': {
@@ -1718,6 +1898,7 @@ const App = (() => {
           break;
         }
       }
+      drawMeasurementLabel(offctx, ann, { zoom: 1 });
       offctx.restore();
     }
     offscreen.toBlob(blob => {
@@ -1861,6 +2042,8 @@ const App = (() => {
   };
 
   const handlePointerDown = (event) => {
+    if (event.button !== 0 && event.button !== 1) return;
+    event.preventDefault();
     const point = toCanvasCoords(event.clientX, event.clientY);
     appState.lastPointer = point;
     const disableSnap = event.ctrlKey || event.metaKey;
@@ -2074,10 +2257,14 @@ const App = (() => {
       }
     } else if (action.tool === 'rect') {
       const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
-      const width = snapped.x - action.start.x;
-      const height = snapped.y - action.start.y;
-      if (Math.abs(width) > 0.5 && Math.abs(height) > 0.5) {
-        createAnnotation('rect', { x: action.start.x, y: action.start.y, width, height });
+      const x1 = action.start.x;
+      const y1 = action.start.y;
+      const x2 = snapped.x;
+      const y2 = snapped.y;
+      const width = Math.abs(x2 - x1);
+      const height = Math.abs(y2 - y1);
+      if (width > 0.5 && height > 0.5) {
+        createAnnotation('rect', { x: Math.min(x1, x2), y: Math.min(y1, y2), width, height });
       }
     } else if (action.tool === 'ellipse') {
       const snapped = snapPoint(point.x, point.y, { disableSnap: event.ctrlKey || event.metaKey });
