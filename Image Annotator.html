@@ -821,6 +821,15 @@ textarea:focus-visible {
     return Math.abs(area / 2);
   }
 
+  function polylineLength(points) {
+    if (!points || points.length < 2) return 0;
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += lengthBetween(points[i - 1], points[i]);
+    }
+    return total;
+  }
+
   function angleBetween(a, b, c) {
     const ab = { x: a.x - b.x, y: a.y - b.y };
     const cb = { x: c.x - b.x, y: c.y - b.y };
@@ -1663,27 +1672,86 @@ textarea:focus-visible {
       ctx2.setLineDash([6 / zoom, 6 / zoom]);
       ctx2.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
       ctx2.restore();
-      if (annotation.type === 'triangle') {
-        drawTriangleHandles(ctx2, annotation.geometry.points, zoom);
-      }
+      const handles = getAnnotationHandles(annotation);
+      if (!handles.length) continue;
+      drawAnnotationHandles(ctx2, handles, zoom);
     }
     ctx2.restore();
   }
 
-  function drawTriangleHandles(context, points, zoom) {
-    if (!points || !points.length) return;
+  function drawAnnotationHandles(context, handles, zoom) {
+    if (!handles.length) return;
     context.save();
     const size = 8 / zoom;
     context.fillStyle = '#2563eb';
     context.strokeStyle = '#ffffff';
     context.lineWidth = 1 / zoom;
-    for (const pt of points) {
+    for (const handle of handles) {
       context.beginPath();
-      context.rect(pt.x - size / 2, pt.y - size / 2, size, size);
+      context.rect(handle.x - size / 2, handle.y - size / 2, size, size);
       context.fill();
       context.stroke();
     }
     context.restore();
+  }
+
+  function getAnnotationHandles(annotation) {
+    if (!annotation || !annotation.geometry) return [];
+    switch (annotation.type) {
+      case 'point': {
+        const { x, y } = annotation.geometry;
+        return Number.isFinite(x) && Number.isFinite(y)
+          ? [{ x, y, kind: 'vertex', index: 0 }]
+          : [];
+      }
+      case 'line': {
+        const { start, end } = annotation.geometry;
+        if (!start || !end) return [];
+        return [
+          { x: start.x, y: start.y, kind: 'vertex', index: 0 },
+          { x: end.x, y: end.y, kind: 'vertex', index: 1 }
+        ];
+      }
+      case 'polyline':
+      case 'polygon':
+      case 'triangle': {
+        const points = annotation.geometry.points || [];
+        return points
+          .map((pt, index) => (pt ? { x: pt.x, y: pt.y, kind: 'vertex', index } : null))
+          .filter(Boolean);
+      }
+      case 'rect':
+      case 'ellipse': {
+        const { x, y, width, height } = annotation.geometry;
+        if (
+          !Number.isFinite(x) ||
+          !Number.isFinite(y) ||
+          !Number.isFinite(width) ||
+          !Number.isFinite(height)
+        ) {
+          return [];
+        }
+        const x2 = x + width;
+        const y2 = y + height;
+        return [
+          { x, y, kind: 'corner', index: 0, anchor: { x: x2, y: y2 } },
+          { x: x2, y, kind: 'corner', index: 1, anchor: { x, y: y2 } },
+          { x: x2, y: y2, kind: 'corner', index: 2, anchor: { x, y } },
+          { x, y: y2, kind: 'corner', index: 3, anchor: { x: x2, y } }
+        ];
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        if (!a || !b || !c) return [];
+        return [
+          { x: a.x, y: a.y, kind: 'vertex', index: 0, key: 'a' },
+          { x: b.x, y: b.y, kind: 'vertex', index: 1, key: 'b' },
+          { x: c.x, y: c.y, kind: 'vertex', index: 2, key: 'c' }
+        ];
+      }
+      default:
+        return [];
+    }
   }
 
   function annotationBounds(annotation) {
@@ -2302,20 +2370,17 @@ textarea:focus-visible {
 
   /* Selection */
 
-  function findTriangleHandle(point) {
+  function findAnnotationHandle(point) {
     const threshold = 10 / appState.viewport.zoom;
     for (let i = appState.annotations.length - 1; i >= 0; i--) {
       const annotation = appState.annotations[i];
-      if (annotation.type !== 'triangle') continue;
       if (!isAnnotationVisible(annotation.id)) continue;
       if (isAnnotationLocked(annotation.id)) continue;
-      const pts = annotation.geometry.points || [];
-      for (let index = 0; index < pts.length; index++) {
-        const pt = pts[index];
-        if (!pt) continue;
-        const dist = Math.hypot(point.x - pt.x, point.y - pt.y);
+      const handles = getAnnotationHandles(annotation);
+      for (const handle of handles) {
+        const dist = Math.hypot(point.x - handle.x, point.y - handle.y);
         if (dist <= threshold) {
-          return { annotation, index };
+          return { annotation, handle };
         }
       }
     }
@@ -2325,14 +2390,21 @@ textarea:focus-visible {
   function handleSelectDown(event) {
     activeHandle = null;
     const point = toCanvasCoords(event.clientX, event.clientY);
-    const handle = findTriangleHandle(point);
-    if (handle) {
-      activeHandle = handle;
-      if (!appState.selection.includes(handle.annotation.id)) {
-        appState.selection = [handle.annotation.id];
+    const handleHit = findAnnotationHandle(point);
+    if (handleHit) {
+      activeHandle = {
+        annotation: handleHit.annotation,
+        index: handleHit.handle.index,
+        kind: handleHit.handle.kind,
+        key: handleHit.handle.key,
+        anchor: handleHit.handle.anchor ? { ...handleHit.handle.anchor } : null
+      };
+      if (!appState.selection.includes(handleHit.annotation.id)) {
+        appState.selection = [handleHit.annotation.id];
       }
       appState.dragStart = point;
       appState.lastPointer = point;
+      updateHandleMeasurement(handleHit.annotation);
       refreshUI();
       scheduleRedraw();
       return;
@@ -2359,13 +2431,8 @@ textarea:focus-visible {
     if (activeHandle) {
       const annotation = activeHandle.annotation;
       if (!annotation || isAnnotationLocked(annotation.id)) return;
-      const target = annotation.geometry.points?.[activeHandle.index];
-      if (!target) return;
-      target.x = point.x;
-      target.y = point.y;
-      if (annotation.geometry.points?.length >= 3) {
-        updateMeasurementStatus(polygonArea(annotation.geometry.points), 'area');
-      }
+      if (!applyHandleDrag(annotation, activeHandle, point, event)) return;
+      updateHandleMeasurement(annotation);
       appState.lastPointer = point;
       scheduleRedraw();
       return;
@@ -2383,9 +2450,117 @@ textarea:focus-visible {
     scheduleRedraw();
   }
 
+  function inferOppositeCorner(rect, index) {
+    if (!rect) return null;
+    const { x, y, width, height } = rect;
+    const x2 = x + width;
+    const y2 = y + height;
+    const anchors = [
+      { x: x2, y: y2 },
+      { x, y: y2 },
+      { x, y },
+      { x: x2, y }
+    ];
+    return anchors[index] ? { ...anchors[index] } : null;
+  }
+
+  function applyHandleDrag(annotation, handle, point, event) {
+    switch (annotation.type) {
+      case 'point': {
+        annotation.geometry.x = point.x;
+        annotation.geometry.y = point.y;
+        return true;
+      }
+      case 'line': {
+        const other = handle.index === 0 ? annotation.geometry.end : annotation.geometry.start;
+        const target = other && isShiftPressed(event) ? constrainPointToAngle(other, point) : point;
+        if (handle.index === 0) {
+          annotation.geometry.start = { ...target };
+        } else {
+          annotation.geometry.end = { ...target };
+        }
+        return true;
+      }
+      case 'polyline':
+      case 'polygon':
+      case 'triangle': {
+        const points = annotation.geometry.points;
+        if (!points || !points[handle.index]) return false;
+        points[handle.index] = { x: point.x, y: point.y };
+        return true;
+      }
+      case 'rect':
+      case 'ellipse': {
+        const anchor = handle.anchor || inferOppositeCorner(annotation.geometry, handle.index);
+        if (!anchor) return false;
+        const target = isShiftPressed(event) ? constrainCornerToSquare(anchor, point) : point;
+        const rect = normalizedRect(anchor, target);
+        annotation.geometry.x = rect.x;
+        annotation.geometry.y = rect.y;
+        annotation.geometry.width = rect.width;
+        annotation.geometry.height = rect.height;
+        return true;
+      }
+      case 'angle': {
+        if (!handle.key) return false;
+        annotation.geometry[handle.key] = { x: point.x, y: point.y };
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  function updateHandleMeasurement(annotation) {
+    switch (annotation.type) {
+      case 'line': {
+        const { start, end } = annotation.geometry;
+        if (start && end) {
+          updateMeasurementStatus(lengthBetween(start, end), 'length');
+        } else {
+          updateMeasurementStatus(null);
+        }
+        break;
+      }
+      case 'polyline': {
+        const points = annotation.geometry.points || [];
+        updateMeasurementStatus(points.length >= 2 ? polylineLength(points) : null, 'length');
+        break;
+      }
+      case 'polygon':
+      case 'triangle': {
+        const points = annotation.geometry.points || [];
+        updateMeasurementStatus(points.length >= 3 ? polygonArea(points) : null, 'area');
+        break;
+      }
+      case 'rect': {
+        const { width, height } = annotation.geometry;
+        updateMeasurementStatus(Math.abs(width * height), 'area');
+        break;
+      }
+      case 'ellipse': {
+        const { width, height } = annotation.geometry;
+        const area = Math.PI * Math.abs(width / 2) * Math.abs(height / 2);
+        updateMeasurementStatus(area > 0 ? area : null, 'area');
+        break;
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        if (a && b && c) {
+          updateMeasurementStatus(angleBetween(a, b, c), 'angle');
+        } else {
+          updateMeasurementStatus(null);
+        }
+        break;
+      }
+      default:
+        updateMeasurementStatus(null);
+    }
+  }
+
   function handleSelectUp(event) {
     if (activeHandle) {
-      pushHistory('Adjust triangle vertex');
+      pushHistory('Adjust annotation handle');
       activeHandle = null;
       updateMeasurementStatus(null);
       return;
