@@ -679,6 +679,34 @@ textarea:focus-visible {
     return (Math.acos(cos) * 180) / Math.PI;
   }
 
+  const ANGLE_SNAP_RADIANS = (15 * Math.PI) / 180;
+
+  function constrainPointToAngle(anchor, target, step = ANGLE_SNAP_RADIANS) {
+    const dx = target.x - anchor.x;
+    const dy = target.y - anchor.y;
+    const distance = Math.hypot(dx, dy);
+    if (!distance) return { ...target };
+    const angle = Math.atan2(dy, dx);
+    const snapped = Math.round(angle / step) * step;
+    return {
+      x: anchor.x + Math.cos(snapped) * distance,
+      y: anchor.y + Math.sin(snapped) * distance
+    };
+  }
+
+  function constrainCornerToSquare(start, target) {
+    const dx = target.x - start.x;
+    const dy = target.y - start.y;
+    const span = Math.max(Math.abs(dx), Math.abs(dy));
+    if (!span) return { ...target };
+    const sx = dx >= 0 ? 1 : -1;
+    const sy = dy >= 0 ? 1 : -1;
+    return {
+      x: start.x + span * sx,
+      y: start.y + span * sy
+    };
+  }
+
   function formatNumber(value, decimals = 2) {
     return parseFloat(value.toFixed(decimals)).toString();
   }
@@ -893,7 +921,6 @@ textarea:focus-visible {
 
   function drawMeasurement(annotation) {
     ctx.save();
-    ctx.scale(1 / appState.viewport.zoom, 1 / appState.viewport.zoom);
     let text = '';
     let position = null;
 
@@ -969,8 +996,11 @@ textarea:focus-visible {
     ctx.translate(x, y);
     ctx.scale(1 / appState.viewport.zoom, 1 / appState.viewport.zoom);
     ctx.font = '12px/1.4 sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
     ctx.fillStyle = '#111827';
-    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineJoin = 'round';
     ctx.lineWidth = 4;
     ctx.strokeText(text, 0, 0);
     ctx.fillText(text, 0, 0);
@@ -1117,7 +1147,7 @@ textarea:focus-visible {
     appState.lastPointer = point;
     updateStatusCoords(point);
 
-    const angleUpdated = updateAngleHover(point);
+    const angleUpdated = updateAngleHover(point, event);
     if (appState.pointerMode === 'angle' && appState.pointerId !== event.pointerId) {
       if (angleUpdated) scheduleRedraw();
       return;
@@ -1142,7 +1172,7 @@ textarea:focus-visible {
       return;
     }
 
-    updateDraft(point);
+    updateDraft(point, event);
   }
 
   function endPointer(event) {
@@ -1160,7 +1190,11 @@ textarea:focus-visible {
     if (PATH_TOOLS.has(appState.pointerMode) && appState.draft && appState.draft.type === appState.pointerMode) {
       const point = toCanvasCoords(event.clientX, event.clientY);
       const geom = appState.draft.geometry;
-      geom.points[geom.points.length - 1] = { ...point };
+      const anchor = geom.points[geom.points.length - 2];
+      const constrained = event.shiftKey && anchor
+        ? constrainPointToAngle(anchor, point)
+        : { ...point };
+      geom.points[geom.points.length - 1] = constrained;
       const effective = effectivePathPoints(geom.points);
       if (appState.pointerMode === 'polyline') {
         updatePolylineMeasurement(effective);
@@ -1170,7 +1204,7 @@ textarea:focus-visible {
           'area'
         );
       }
-      geom.points.push({ ...point });
+      geom.points.push({ ...constrained });
       scheduleRedraw();
       return;
     }
@@ -1306,31 +1340,48 @@ textarea:focus-visible {
     scheduleRedraw();
   }
 
-  function updateDraft(point) {
+  function updateDraft(point, event) {
     if (!appState.draft) return;
     const draft = appState.draft;
+    const shift = !!(event && event.shiftKey);
     switch (draft.type) {
       case 'point':
         draft.geometry = { x: point.x, y: point.y };
         break;
       case 'line':
-        draft.geometry.end = { ...point };
+        draft.geometry.end = shift
+          ? constrainPointToAngle(draft.geometry.start, point)
+          : { ...point };
         updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end), 'length');
         break;
       case 'polyline':
-        draft.geometry.points[draft.geometry.points.length - 1] = { ...point };
+        draft.geometry.points[draft.geometry.points.length - 1] = (() => {
+          if (!shift) return { ...point };
+          const anchor = draft.geometry.points[draft.geometry.points.length - 2];
+          return anchor ? constrainPointToAngle(anchor, point) : { ...point };
+        })();
         updatePolylineMeasurement(effectivePathPoints(draft.geometry.points));
         break;
       case 'rect':
-        draft.geometry = normalizedRect(appState.dragStart, point);
+        draft.geometry = normalizedRect(
+          appState.dragStart,
+          shift ? constrainCornerToSquare(appState.dragStart, point) : point
+        );
         updateMeasurementStatus(Math.abs(draft.geometry.width * draft.geometry.height), 'area');
         break;
       case 'ellipse':
-        draft.geometry = normalizedRect(appState.dragStart, point);
+        draft.geometry = normalizedRect(
+          appState.dragStart,
+          shift ? constrainCornerToSquare(appState.dragStart, point) : point
+        );
         updateMeasurementStatus(Math.PI * Math.abs(draft.geometry.width / 2) * Math.abs(draft.geometry.height / 2), 'area');
         break;
       case 'polygon':
-        draft.geometry.points[draft.geometry.points.length - 1] = { ...point };
+        draft.geometry.points[draft.geometry.points.length - 1] = (() => {
+          if (!shift) return { ...point };
+          const anchor = draft.geometry.points[draft.geometry.points.length - 2];
+          return anchor ? constrainPointToAngle(anchor, point) : { ...point };
+        })();
         const polyPoints = effectivePathPoints(draft.geometry.points);
         if (polyPoints.length >= 3) {
           updateMeasurementStatus(polygonArea(polyPoints), 'area');
@@ -1339,10 +1390,12 @@ textarea:focus-visible {
         }
         break;
       case 'angle':
-        updateAngleHover(point);
+        updateAngleHover(point, event);
         break;
       case 'calibrate':
-        draft.geometry.end = { ...point };
+        draft.geometry.end = shift
+          ? constrainPointToAngle(draft.geometry.start, point)
+          : { ...point };
         updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end), 'length');
         break;
     }
@@ -1506,16 +1559,17 @@ textarea:focus-visible {
     };
   }
 
-  function updateAngleHover(point) {
+  function updateAngleHover(point, event) {
     if (!appState.draft || appState.draft.type !== 'angle') return false;
     const geom = appState.draft.geometry;
+    const shift = !!(event && event.shiftKey);
     if (geom.stage === 1) {
-      geom.b = { ...point };
+      geom.b = shift ? constrainPointToAngle(geom.a, point) : { ...point };
       updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
       return true;
     }
     if (geom.stage === 2) {
-      geom.c = { ...point };
+      geom.c = shift ? constrainPointToAngle(geom.b, point) : { ...point };
       updateMeasurementStatus(angleBetween(geom.a, geom.b, geom.c), 'angle');
       return true;
     }
@@ -1532,14 +1586,14 @@ textarea:focus-visible {
     }
     const geom = appState.draft.geometry;
     if (geom.stage === 1) {
-      geom.b = { ...point };
+      geom.b = event.shiftKey ? constrainPointToAngle(geom.a, point) : { ...point };
       geom.stage = 2;
       updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
       scheduleRedraw();
       return;
     }
     if (geom.stage === 2) {
-      geom.c = { ...point };
+      geom.c = event.shiftKey ? constrainPointToAngle(geom.b, point) : { ...point };
       geom.stage = 3;
       finishDrawing();
     }
