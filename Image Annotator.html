@@ -578,6 +578,8 @@ textarea:focus-visible {
   const TRIANGLE_POINT_LABELS = ['A', 'B', 'C'];
   const TRIANGLE_SIDE_LABELS = ['AB', 'BC', 'CA'];
   const SNAP_DISTANCE = 10; // screen px
+  const MIN_ZOOM = 0.01;
+  const MAX_ZOOM = 16;
   const VANISH_COLORS = {
     left: '#FDD835',
     right: '#E53935',
@@ -1845,6 +1847,102 @@ textarea:focus-visible {
     return false;
   }
 
+  function shouldSnapOnPointerDown(mode) {
+    if (mode === 'pan' || mode === 'select') {
+      return false;
+    }
+    return true;
+  }
+
+  function shouldSnapDuringMove(mode, isDragging) {
+    if (mode === 'pan') {
+      return false;
+    }
+    if (mode === 'select') {
+      return !!isDragging;
+    }
+    return true;
+  }
+
+  function maybeSnapPoint(point, options = {}) {
+    const { includeDraft = true } = options;
+    if (!appState.settings.snapEnabled || appState.modifiers.ctrl) {
+      return { ...point };
+    }
+
+    const pxX = worldToScreenX(point.x);
+    const pxY = worldToScreenY(point.y);
+    let best = SNAP_DISTANCE;
+    let bestPoint = { x: point.x, y: point.y };
+
+    const considerPoint = candidate => {
+      if (!candidate) return;
+      if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y)) return;
+      const sx = worldToScreenX(candidate.x);
+      const sy = worldToScreenY(candidate.y);
+      const dist = Math.hypot(sx - pxX, sy - pxY);
+      if (dist <= best) {
+        best = dist;
+        bestPoint = { x: candidate.x, y: candidate.y };
+      }
+    };
+
+    if (appState.image) {
+      const { width, height } = appState.image;
+      const corners = [
+        { x: 0, y: 0 },
+        { x: width, y: 0 },
+        { x: width, y: height },
+        { x: 0, y: height }
+      ];
+      corners.forEach(considerPoint);
+
+      const considerVerticalEdge = x => {
+        const sx = worldToScreenX(x);
+        const dx = Math.abs(sx - pxX);
+        if (dx > SNAP_DISTANCE) return;
+        const clampedY = clamp(point.y, 0, height);
+        const sy = worldToScreenY(clampedY);
+        const dist = Math.hypot(dx, sy - pxY);
+        if (dist <= best) {
+          best = dist;
+          bestPoint = { x, y: clampedY };
+        }
+      };
+
+      const considerHorizontalEdge = y => {
+        const sy = worldToScreenY(y);
+        const dy = Math.abs(sy - pxY);
+        if (dy > SNAP_DISTANCE) return;
+        const clampedX = clamp(point.x, 0, width);
+        const sx = worldToScreenX(clampedX);
+        const dist = Math.hypot(sx - pxX, dy);
+        if (dist <= best) {
+          best = dist;
+          bestPoint = { x: clampedX, y };
+        }
+      };
+
+      considerVerticalEdge(0);
+      considerVerticalEdge(width);
+      considerHorizontalEdge(0);
+      considerHorizontalEdge(height);
+    }
+
+    for (const annotation of appState.annotations) {
+      if (!isAnnotationVisible(annotation.id)) continue;
+      const pts = collectAnnotationPoints(annotation);
+      pts.forEach(considerPoint);
+    }
+
+    if (includeDraft && appState.draft) {
+      const draftPoints = collectAnnotationPoints(appState.draft, true);
+      draftPoints.forEach(considerPoint);
+    }
+
+    return bestPoint;
+  }
+
   /* ==========================================
      Tools & Interaction
      ========================================== */
@@ -1859,7 +1957,10 @@ textarea:focus-visible {
 
   function beginPointer(event) {
     if (!canvas.contains(event.target)) return;
-    const point = toCanvasCoords(event.clientX, event.clientY);
+    const rawPoint = toCanvasCoords(event.clientX, event.clientY);
+    const point = shouldSnapOnPointerDown(appState.pointerMode)
+      ? maybeSnapPoint(rawPoint)
+      : rawPoint;
     appState.dragStart = point;
     appState.lastPointer = point;
 
@@ -1904,7 +2005,11 @@ textarea:focus-visible {
 
   function movePointer(event) {
     if (!canvas.contains(event.target)) return;
-    const point = toCanvasCoords(event.clientX, event.clientY);
+    const rawPoint = toCanvasCoords(event.clientX, event.clientY);
+    const isDragging = appState.pointerId === event.pointerId && event.buttons !== 0;
+    const point = shouldSnapDuringMove(appState.pointerMode, isDragging)
+      ? maybeSnapPoint(rawPoint)
+      : rawPoint;
     appState.lastPointer = point;
     updateStatusCoords(point);
 
@@ -1949,13 +2054,14 @@ textarea:focus-visible {
     }
 
     if (PATH_TOOLS.has(appState.pointerMode) && appState.draft && appState.draft.type === appState.pointerMode) {
-      const point = toCanvasCoords(event.clientX, event.clientY);
+      const rawPoint = toCanvasCoords(event.clientX, event.clientY);
       const geom = appState.draft.geometry;
       const anchor = geom.points[geom.points.length - 2];
       const constrained = isShiftPressed(event) && anchor
-        ? constrainPointToAngle(anchor, point)
-        : { ...point };
-      geom.points[geom.points.length - 1] = constrained;
+        ? constrainPointToAngle(anchor, rawPoint)
+        : { ...rawPoint };
+      const snapped = maybeSnapPoint(constrained);
+      geom.points[geom.points.length - 1] = snapped;
       const effective = effectivePathPoints(geom.points);
       if (appState.pointerMode === 'polyline') {
         updatePolylineMeasurement(effective);
@@ -1965,7 +2071,7 @@ textarea:focus-visible {
           'area'
         );
       }
-      geom.points.push({ ...constrained });
+      geom.points.push({ ...snapped });
       scheduleRedraw();
       return;
     }
@@ -1988,7 +2094,7 @@ textarea:focus-visible {
     event.preventDefault();
     const delta = Math.sign(event.deltaY);
     const zoomFactor = delta > 0 ? 0.9 : 1.1;
-    const newZoom = clamp(appState.viewport.zoom * zoomFactor, 0.2, 8);
+    const newZoom = clamp(appState.viewport.zoom * zoomFactor, MIN_ZOOM, MAX_ZOOM);
     const rect = canvas.getBoundingClientRect();
     const cx = (event.clientX - rect.left) * appState.viewport.dpr;
     const cy = (event.clientY - rect.top) * appState.viewport.dpr;
@@ -2114,41 +2220,49 @@ textarea:focus-visible {
     const shift = isShiftPressed(event);
     switch (draft.type) {
       case 'point':
-        draft.geometry = { x: point.x, y: point.y };
+        draft.geometry = maybeSnapPoint({ x: point.x, y: point.y });
         break;
       case 'line':
-        draft.geometry.end = shift
-          ? constrainPointToAngle(draft.geometry.start, point)
-          : { ...point };
+        draft.geometry.end = maybeSnapPoint(
+          shift
+            ? constrainPointToAngle(draft.geometry.start, point)
+            : { ...point }
+        );
         updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end), 'length');
         break;
       case 'polyline':
         draft.geometry.points[draft.geometry.points.length - 1] = (() => {
-          if (!shift) return { ...point };
+          if (!shift) return maybeSnapPoint({ ...point });
           const anchor = draft.geometry.points[draft.geometry.points.length - 2];
-          return anchor ? constrainPointToAngle(anchor, point) : { ...point };
+          const constrained = anchor ? constrainPointToAngle(anchor, point) : { ...point };
+          return maybeSnapPoint(constrained);
         })();
         updatePolylineMeasurement(effectivePathPoints(draft.geometry.points));
         break;
       case 'rect':
         draft.geometry = normalizedRect(
           appState.dragStart,
-          shift ? constrainCornerToSquare(appState.dragStart, point) : point
+          maybeSnapPoint(
+            shift ? constrainCornerToSquare(appState.dragStart, point) : { ...point }
+          )
         );
         updateMeasurementStatus(Math.abs(draft.geometry.width * draft.geometry.height), 'area');
         break;
       case 'ellipse':
         draft.geometry = normalizedRect(
           appState.dragStart,
-          shift ? constrainCornerToSquare(appState.dragStart, point) : point
+          maybeSnapPoint(
+            shift ? constrainCornerToSquare(appState.dragStart, point) : { ...point }
+          )
         );
         updateMeasurementStatus(Math.PI * Math.abs(draft.geometry.width / 2) * Math.abs(draft.geometry.height / 2), 'area');
         break;
       case 'polygon':
         draft.geometry.points[draft.geometry.points.length - 1] = (() => {
-          if (!shift) return { ...point };
+          if (!shift) return maybeSnapPoint({ ...point });
           const anchor = draft.geometry.points[draft.geometry.points.length - 2];
-          return anchor ? constrainPointToAngle(anchor, point) : { ...point };
+          const constrained = anchor ? constrainPointToAngle(anchor, point) : { ...point };
+          return maybeSnapPoint(constrained);
         })();
         const polyPoints = effectivePathPoints(draft.geometry.points);
         if (polyPoints.length >= 3) {
@@ -2158,7 +2272,7 @@ textarea:focus-visible {
         }
         break;
       case 'triangle': {
-        const rect = normalizedRect(appState.dragStart, point);
+        const rect = normalizedRect(appState.dragStart, maybeSnapPoint({ ...point }));
         const apex = { x: rect.x + rect.width / 2, y: rect.y };
         const left = { x: rect.x, y: rect.y + rect.height };
         const right = { x: rect.x + rect.width, y: rect.y + rect.height };
@@ -2171,9 +2285,11 @@ textarea:focus-visible {
         updateAngleHover(point, event);
         break;
       case 'calibrate':
-        draft.geometry.end = shift
-          ? constrainPointToAngle(draft.geometry.start, point)
-          : { ...point };
+        draft.geometry.end = maybeSnapPoint(
+          shift
+            ? constrainPointToAngle(draft.geometry.start, point)
+            : { ...point }
+        );
         updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end), 'length');
         break;
     }
@@ -2348,12 +2464,14 @@ textarea:focus-visible {
     const geom = appState.draft.geometry;
     const shift = isShiftPressed(event);
     if (geom.stage === 1) {
-      geom.b = shift ? constrainPointToAngle(geom.a, point) : { ...point };
+      const target = shift ? constrainPointToAngle(geom.a, point) : { ...point };
+      geom.b = maybeSnapPoint(target);
       updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
       return true;
     }
     if (geom.stage === 2) {
-      geom.c = shift ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      const target = shift ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      geom.c = maybeSnapPoint(target);
       updateMeasurementStatus(angleBetween(geom.a, geom.b, geom.c), 'angle');
       return true;
     }
@@ -2362,7 +2480,7 @@ textarea:focus-visible {
 
   function handleAngleClick(event) {
     if (appState.pointerMode !== 'angle') return;
-    const point = toCanvasCoords(event.clientX, event.clientY);
+    const point = maybeSnapPoint(toCanvasCoords(event.clientX, event.clientY));
     if (!appState.draft || appState.draft.type !== 'angle') {
       appState.draft = createAngleDraft(point);
       scheduleRedraw();
@@ -2370,14 +2488,16 @@ textarea:focus-visible {
     }
     const geom = appState.draft.geometry;
     if (geom.stage === 1) {
-      geom.b = isShiftPressed(event) ? constrainPointToAngle(geom.a, point) : { ...point };
+      const target = isShiftPressed(event) ? constrainPointToAngle(geom.a, point) : { ...point };
+      geom.b = maybeSnapPoint(target);
       geom.stage = 2;
       updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
       scheduleRedraw();
       return;
     }
     if (geom.stage === 2) {
-      geom.c = isShiftPressed(event) ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      const target = isShiftPressed(event) ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      geom.c = maybeSnapPoint(target);
       geom.stage = 3;
       finishDrawing();
     }
@@ -2391,10 +2511,12 @@ textarea:focus-visible {
     }
     const geom = appState.draft.geometry;
     if (geom.stage === 1) {
-      geom.b = isShiftPressed(event) ? constrainPointToAngle(geom.a, point) : { ...point };
+      const target = isShiftPressed(event) ? constrainPointToAngle(geom.a, point) : { ...point };
+      geom.b = maybeSnapPoint(target);
       updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
     } else if (geom.stage === 2) {
-      geom.c = isShiftPressed(event) ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      const target = isShiftPressed(event) ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      geom.c = maybeSnapPoint(target);
       updateMeasurementStatus(angleBetween(geom.a, geom.b, geom.c), 'angle');
     }
     scheduleRedraw();
@@ -2507,17 +2629,19 @@ textarea:focus-visible {
   function applyHandleDrag(annotation, handle, point, event) {
     switch (annotation.type) {
       case 'point': {
-        annotation.geometry.x = point.x;
-        annotation.geometry.y = point.y;
+        const snapped = maybeSnapPoint(point);
+        annotation.geometry.x = snapped.x;
+        annotation.geometry.y = snapped.y;
         return true;
       }
       case 'line': {
         const other = handle.index === 0 ? annotation.geometry.end : annotation.geometry.start;
         const target = other && isShiftPressed(event) ? constrainPointToAngle(other, point) : point;
+        const snapped = maybeSnapPoint(target);
         if (handle.index === 0) {
-          annotation.geometry.start = { ...target };
+          annotation.geometry.start = { ...snapped };
         } else {
-          annotation.geometry.end = { ...target };
+          annotation.geometry.end = { ...snapped };
         }
         return true;
       }
@@ -2526,7 +2650,8 @@ textarea:focus-visible {
       case 'triangle': {
         const points = annotation.geometry.points;
         if (!points || !points[handle.index]) return false;
-        points[handle.index] = { x: point.x, y: point.y };
+        const snapped = maybeSnapPoint(point);
+        points[handle.index] = { x: snapped.x, y: snapped.y };
         return true;
       }
       case 'rect':
@@ -2534,7 +2659,8 @@ textarea:focus-visible {
         const anchor = handle.anchor || inferOppositeCorner(annotation.geometry, handle.index);
         if (!anchor) return false;
         const target = isShiftPressed(event) ? constrainCornerToSquare(anchor, point) : point;
-        const rect = normalizedRect(anchor, target);
+        const snapped = maybeSnapPoint(target);
+        const rect = normalizedRect(anchor, snapped);
         annotation.geometry.x = rect.x;
         annotation.geometry.y = rect.y;
         annotation.geometry.width = rect.width;
@@ -2543,7 +2669,8 @@ textarea:focus-visible {
       }
       case 'angle': {
         if (!handle.key) return false;
-        annotation.geometry[handle.key] = { x: point.x, y: point.y };
+        const snapped = maybeSnapPoint(point);
+        annotation.geometry[handle.key] = { x: snapped.x, y: snapped.y };
         return true;
       }
       default:
@@ -3326,7 +3453,7 @@ textarea:focus-visible {
     switch (preset) {
       case 'fit':
         fitImage();
-        break;
+        return;
       case 'fill': {
         const rect = canvas.getBoundingClientRect();
         const zoom = Math.max(
@@ -3349,6 +3476,7 @@ textarea:focus-visible {
         appState.viewport.panY = (canvas.height - appState.image.height * appState.viewport.zoom) / 2;
         break;
     }
+    appState.viewport.zoom = clamp(appState.viewport.zoom, MIN_ZOOM, MAX_ZOOM);
     updateZoomStatus();
     scheduleRedraw();
   }
