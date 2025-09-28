@@ -261,16 +261,23 @@ aside {
 
 .layer-item,
 .annotation-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid transparent;
 }
 
-.layer-item.selected,
-.annotation-item.selected {
+.layer-row,
+.annotation-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.layer-item.selected > .layer-row,
+.annotation-item.selected > .annotation-row {
   background: var(--layer-selected);
   border-color: rgba(37, 99, 235, 0.3);
 }
@@ -281,6 +288,44 @@ aside {
   background: transparent;
   cursor: pointer;
   color: var(--text-muted);
+}
+
+.layer-children {
+  list-style: none;
+  margin: 0 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.layer-meta {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.annotation-row {
+  cursor: pointer;
+}
+
+.annotation-item.hidden .annotation-row {
+  opacity: 0.6;
+}
+
+.layer-item.hidden > .layer-row {
+  opacity: 0.6;
+}
+
+.layer-item.locked > .layer-row {
+  font-style: italic;
+}
+
+.annotation-measurement {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 #properties-panel label,
@@ -510,7 +555,8 @@ textarea:focus-visible {
     pointerMode: 'select',
     pointerId: null,
     dragStart: null,
-    lastPointer: null
+    lastPointer: null,
+    modifiers: { shift: false, alt: false, ctrl: false }
   };
 
   let autosaveTimer = null;
@@ -532,6 +578,27 @@ textarea:focus-visible {
 
   function deepClone(data) {
     return structuredClone ? structuredClone(data) : JSON.parse(JSON.stringify(data));
+  }
+
+  function applyModifier(event, isDown) {
+    const key = event.key;
+    if (key === 'Shift') {
+      appState.modifiers.shift = isDown;
+    } else if (key === 'Alt') {
+      appState.modifiers.alt = isDown;
+    } else if (key === 'Control' || key === 'Meta') {
+      appState.modifiers.ctrl = isDown;
+    }
+  }
+
+  function resetModifiers() {
+    appState.modifiers.shift = false;
+    appState.modifiers.alt = false;
+    appState.modifiers.ctrl = false;
+  }
+
+  function isShiftPressed(event) {
+    return !!(event?.shiftKey || appState.modifiers.shift);
   }
 
   function toCanvasCoords(clientX, clientY) {
@@ -610,10 +677,15 @@ textarea:focus-visible {
     appState.viewport.panY = snapshot.viewport.panY;
     appState.settings = deepClone(snapshot.settings || appState.settings);
     appState.layers = deepClone(snapshot.layers);
-    appState.annotations = deepClone(snapshot.annotations);
+    appState.annotations = deepClone(snapshot.annotations || []).map(annotation => ({
+      ...annotation,
+      hidden: !!annotation.hidden,
+      locked: !!annotation.locked
+    }));
     appState.calibration = snapshot.calibration ? { ...snapshot.calibration } : null;
     appState.selection = [];
     appState.draft = null;
+    resetModifiers();
     scheduleRedraw();
     refreshUI();
     updateMeasurementStatus(null);
@@ -728,6 +800,73 @@ textarea:focus-visible {
     }
     const real = value * calibration.ratio;
     return `${formatNumber(real, decimals)} ${calibration.unit}`;
+  }
+
+  const TYPE_LABELS = {
+    point: 'Point',
+    line: 'Line',
+    polyline: 'Path',
+    rect: 'Rectangle',
+    ellipse: 'Ellipse',
+    polygon: 'Polygon',
+    angle: 'Angle',
+    text: 'Text'
+  };
+
+  function annotationDisplayName(annotation) {
+    if (annotation.label && annotation.label.trim()) {
+      return annotation.label.trim();
+    }
+    const typeLabel = TYPE_LABELS[annotation.type] || annotation.type;
+    return `${typeLabel} (${annotation.id.slice(-4)})`;
+  }
+
+  function measurementLabel(kind) {
+    return kind === 'area' ? 'Area' : kind === 'angle' ? 'Angle' : 'Length';
+  }
+
+  function measurementForAnnotation(annotation) {
+    switch (annotation.type) {
+      case 'line':
+        return {
+          kind: 'length',
+          value: lengthBetween(annotation.geometry.start, annotation.geometry.end)
+        };
+      case 'polyline': {
+        const pts = annotation.geometry.points;
+        if (!pts || pts.length < 2) return null;
+        let total = 0;
+        for (let i = 1; i < pts.length; i++) {
+          total += lengthBetween(pts[i - 1], pts[i]);
+        }
+        return { kind: 'length', value: total };
+      }
+      case 'rect': {
+        const { width, height } = annotation.geometry;
+        if (width == null || height == null) return null;
+        return { kind: 'area', value: Math.abs(width * height) };
+      }
+      case 'ellipse': {
+        const { width, height } = annotation.geometry;
+        if (width == null || height == null) return null;
+        return {
+          kind: 'area',
+          value: Math.PI * Math.abs(width / 2) * Math.abs(height / 2)
+        };
+      }
+      case 'polygon': {
+        const pts = annotation.geometry.points;
+        if (!pts || pts.length < 3) return null;
+        return { kind: 'area', value: polygonArea(pts) };
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        if (!a || !b || !c) return null;
+        return { kind: 'angle', value: angleBetween(a, b, c) };
+      }
+      default:
+        return null;
+    }
   }
 
   function effectivePathPoints(points) {
@@ -1077,12 +1216,26 @@ textarea:focus-visible {
   }
 
   function isAnnotationVisible(id) {
+    const annotation = appState.annotations.find(a => a.id === id);
+    if (!annotation || annotation.hidden) return false;
     for (const layer of appState.layers) {
-      if (layer.children.includes(id)) {
-        return layer.visible !== false;
+      if (layerContainsAnnotation(layer, id) && layer.visible === false) {
+        return false;
       }
     }
     return true;
+  }
+
+  function isAnnotationLocked(id) {
+    const annotation = appState.annotations.find(a => a.id === id);
+    if (!annotation) return true;
+    if (annotation.locked) return true;
+    for (const layer of appState.layers) {
+      if (layerContainsAnnotation(layer, id) && layer.locked) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /* ==========================================
@@ -1191,7 +1344,7 @@ textarea:focus-visible {
       const point = toCanvasCoords(event.clientX, event.clientY);
       const geom = appState.draft.geometry;
       const anchor = geom.points[geom.points.length - 2];
-      const constrained = event.shiftKey && anchor
+      const constrained = isShiftPressed(event) && anchor
         ? constrainPointToAngle(anchor, point)
         : { ...point };
       geom.points[geom.points.length - 1] = constrained;
@@ -1343,7 +1496,7 @@ textarea:focus-visible {
   function updateDraft(point, event) {
     if (!appState.draft) return;
     const draft = appState.draft;
-    const shift = !!(event && event.shiftKey);
+    const shift = isShiftPressed(event);
     switch (draft.type) {
       case 'point':
         draft.geometry = { x: point.x, y: point.y };
@@ -1468,6 +1621,8 @@ textarea:focus-visible {
   function commitAnnotation(annotation) {
     const ann = deepClone(annotation);
     delete ann.geometry.stage;
+    ann.hidden = !!ann.hidden;
+    ann.locked = !!ann.locked;
     appState.annotations.push(ann);
     const baseLayer = appState.layers.find(layer => layer.id === 'base');
     if (baseLayer) {
@@ -1510,6 +1665,7 @@ textarea:focus-visible {
     updateMeasurementStatus(null);
     toast(`Scale set to ${formatNumber(appState.calibration.ratio, 4)} ${appState.calibration.unit}/px`);
     setTool('select');
+    refreshUI();
     return true;
   }
 
@@ -1562,7 +1718,7 @@ textarea:focus-visible {
   function updateAngleHover(point, event) {
     if (!appState.draft || appState.draft.type !== 'angle') return false;
     const geom = appState.draft.geometry;
-    const shift = !!(event && event.shiftKey);
+    const shift = isShiftPressed(event);
     if (geom.stage === 1) {
       geom.b = shift ? constrainPointToAngle(geom.a, point) : { ...point };
       updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
@@ -1586,14 +1742,14 @@ textarea:focus-visible {
     }
     const geom = appState.draft.geometry;
     if (geom.stage === 1) {
-      geom.b = event.shiftKey ? constrainPointToAngle(geom.a, point) : { ...point };
+      geom.b = isShiftPressed(event) ? constrainPointToAngle(geom.a, point) : { ...point };
       geom.stage = 2;
       updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
       scheduleRedraw();
       return;
     }
     if (geom.stage === 2) {
-      geom.c = event.shiftKey ? constrainPointToAngle(geom.b, point) : { ...point };
+      geom.c = isShiftPressed(event) ? constrainPointToAngle(geom.b, point) : { ...point };
       geom.stage = 3;
       finishDrawing();
     }
@@ -1612,7 +1768,7 @@ textarea:focus-visible {
   function handleSelectDown(event) {
     const hit = hitTest(toCanvasCoords(event.clientX, event.clientY));
     if (hit) {
-      if (!event.shiftKey) {
+      if (!isShiftPressed(event)) {
         appState.selection = [hit.id];
       } else if (!appState.selection.includes(hit.id)) {
         appState.selection.push(hit.id);
@@ -1633,7 +1789,7 @@ textarea:focus-visible {
     if (!dx && !dy) return;
     for (const id of appState.selection) {
       const annotation = appState.annotations.find(a => a.id === id);
-      if (annotation) {
+      if (annotation && !isAnnotationLocked(annotation.id)) {
         translateAnnotation(annotation, dx, dy);
       }
     }
@@ -1725,28 +1881,208 @@ textarea:focus-visible {
     updateUndoRedoButtons();
   }
 
+  function findLayerById(id) {
+    return appState.layers.find(layer => layer.id === id) || null;
+  }
+
+  function layerContainsAnnotation(layer, annotationId) {
+    if (!layer || !layer.children) return false;
+    for (const child of layer.children) {
+      if (child === annotationId) return true;
+      const childLayer = findLayerById(child);
+      if (childLayer && layerContainsAnnotation(childLayer, annotationId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function gatherAnnotationIds(layer) {
+    const ids = [];
+    if (!layer || !layer.children) return ids;
+    for (const child of layer.children) {
+      const childLayer = findLayerById(child);
+      if (childLayer) {
+        ids.push(...gatherAnnotationIds(childLayer));
+      } else {
+        ids.push(child);
+      }
+    }
+    return ids;
+  }
+
+  function toggleAnnotationVisibility(annotation) {
+    annotation.hidden = !annotation.hidden;
+    if (annotation.hidden) {
+      appState.selection = appState.selection.filter(id => id !== annotation.id);
+    }
+    scheduleRedraw();
+    pushHistory('Toggle annotation visibility');
+    refreshUI();
+  }
+
+  function toggleAnnotationLock(annotation) {
+    annotation.locked = !annotation.locked;
+    pushHistory('Toggle annotation lock');
+    refreshUI();
+  }
+
+  function toggleLayerVisibility(layer) {
+    layer.visible = layer.visible === false ? true : false;
+    if (layer.visible === false) {
+      const ids = gatherAnnotationIds(layer);
+      if (ids.length) {
+        appState.selection = appState.selection.filter(id => !ids.includes(id));
+      }
+    }
+    scheduleRedraw();
+    pushHistory('Toggle layer visibility');
+    refreshUI();
+  }
+
+  function toggleLayerLock(layer) {
+    layer.locked = !layer.locked;
+    pushHistory('Toggle layer lock');
+    refreshUI();
+  }
+
   function refreshLayers() {
     const list = $('#layer-list');
     list.innerHTML = '';
     for (const layer of appState.layers) {
-      const item = document.createElement('li');
-      item.className = 'layer-item';
-      item.dataset.id = layer.id;
-      const title = document.createElement('span');
-      title.textContent = layer.name;
-      item.appendChild(title);
-      const visBtn = document.createElement('button');
-      visBtn.textContent = layer.visible === false ? '👁‍🗨' : '👁';
-      visBtn.title = 'Toggle visibility';
-      visBtn.addEventListener('click', () => {
-        layer.visible = layer.visible === false ? true : false;
+      list.appendChild(renderLayerTree(layer, 0));
+    }
+  }
+
+  function renderLayerTree(layer, depth) {
+    const item = document.createElement('li');
+    item.className = 'layer-item';
+    item.dataset.id = layer.id;
+    if (layer.visible === false) {
+      item.classList.add('hidden');
+    }
+    if (layer.locked) {
+      item.classList.add('locked');
+    }
+    const row = document.createElement('div');
+    row.className = 'layer-row';
+    row.style.paddingLeft = `${depth * 12}px`;
+
+    const visBtn = document.createElement('button');
+    visBtn.textContent = layer.visible === false ? '🙈' : '👁';
+    visBtn.title = layer.visible === false ? 'Show layer' : 'Hide layer';
+    visBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleLayerVisibility(layer);
+    });
+    row.appendChild(visBtn);
+
+    const lockBtn = document.createElement('button');
+    lockBtn.textContent = layer.locked ? '🔒' : '🔓';
+    lockBtn.title = layer.locked ? 'Unlock layer' : 'Lock layer';
+    lockBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleLayerLock(layer);
+    });
+    row.appendChild(lockBtn);
+
+    const title = document.createElement('span');
+    title.textContent = layer.name;
+    row.appendChild(title);
+
+    const meta = document.createElement('span');
+    meta.className = 'layer-meta';
+    const layerCount = gatherAnnotationIds(layer).length;
+    meta.textContent = layerCount === 1 ? '1 item' : `${layerCount} items`;
+    row.appendChild(meta);
+
+    row.addEventListener('click', () => {
+      const ids = gatherAnnotationIds(layer);
+      if (ids.length) {
+        appState.selection = ids;
         scheduleRedraw();
         refreshUI();
-        pushHistory('Toggle layer');
-      });
-      item.appendChild(visBtn);
-      list.appendChild(item);
+      }
+    });
+
+    item.appendChild(row);
+
+    if (layer.children && layer.children.length) {
+      const childList = document.createElement('ul');
+      childList.className = 'layer-children';
+      for (const child of layer.children) {
+        const childLayer = findLayerById(child);
+        if (childLayer) {
+          childList.appendChild(renderLayerTree(childLayer, depth + 1));
+        } else {
+          const annotation = appState.annotations.find(a => a.id === child);
+          if (annotation) {
+            childList.appendChild(renderLayerAnnotation(annotation, depth + 1));
+          }
+        }
+      }
+      if (childList.children.length) {
+        item.appendChild(childList);
+      }
     }
+
+    return item;
+  }
+
+  function renderLayerAnnotation(annotation, depth) {
+    const item = document.createElement('li');
+    item.className = 'layer-item layer-annotation';
+    if (appState.selection.includes(annotation.id)) {
+      item.classList.add('selected');
+    }
+    if (annotation.hidden) {
+      item.classList.add('hidden');
+    }
+    if (annotation.locked) {
+      item.classList.add('locked');
+    }
+    const row = document.createElement('div');
+    row.className = 'layer-row';
+    row.style.paddingLeft = `${depth * 12}px`;
+
+    const visBtn = document.createElement('button');
+    visBtn.textContent = annotation.hidden ? '🙈' : '👁';
+    visBtn.title = annotation.hidden ? 'Show annotation' : 'Hide annotation';
+    visBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleAnnotationVisibility(annotation);
+    });
+    row.appendChild(visBtn);
+
+    const lockBtn = document.createElement('button');
+    lockBtn.textContent = annotation.locked ? '🔒' : '🔓';
+    lockBtn.title = annotation.locked ? 'Unlock annotation' : 'Lock annotation';
+    lockBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleAnnotationLock(annotation);
+    });
+    row.appendChild(lockBtn);
+
+    const title = document.createElement('span');
+    title.textContent = annotationDisplayName(annotation);
+    row.appendChild(title);
+
+    const measurement = measurementForAnnotation(annotation);
+    if (measurement) {
+      const meta = document.createElement('span');
+      meta.className = 'layer-meta';
+      meta.textContent = `${measurementLabel(measurement.kind)}: ${formatMeasurement(measurement.value, measurement.kind)}`;
+      row.appendChild(meta);
+    }
+
+    row.addEventListener('click', () => {
+      appState.selection = [annotation.id];
+      scheduleRedraw();
+      refreshUI();
+    });
+
+    item.appendChild(row);
+    return item;
   }
 
   function refreshAnnotationsList() {
@@ -1759,19 +2095,39 @@ textarea:focus-visible {
       if (appState.selection.includes(annotation.id)) {
         item.classList.add('selected');
       }
-      const label = document.createElement('span');
-      label.textContent = `${annotation.type} (${annotation.id.slice(-4)})`;
-      item.appendChild(label);
-      const delBtn = document.createElement('button');
-      delBtn.textContent = '✕';
-      delBtn.title = 'Delete annotation';
-      delBtn.addEventListener('click', () => deleteAnnotation(annotation.id));
-      item.appendChild(delBtn);
-      item.addEventListener('click', () => {
+      if (annotation.hidden || !isAnnotationVisible(annotation.id)) {
+        item.classList.add('hidden');
+      }
+      const row = document.createElement('div');
+      row.className = 'annotation-row';
+      row.addEventListener('click', () => {
         appState.selection = [annotation.id];
         scheduleRedraw();
         refreshUI();
       });
+
+      const name = document.createElement('span');
+      name.textContent = annotationDisplayName(annotation);
+      row.appendChild(name);
+
+      const measurement = measurementForAnnotation(annotation);
+      if (measurement) {
+        const measurementEl = document.createElement('span');
+        measurementEl.className = 'annotation-measurement';
+        measurementEl.textContent = `${measurementLabel(measurement.kind)}: ${formatMeasurement(measurement.value, measurement.kind)}`;
+        row.appendChild(measurementEl);
+      }
+
+      const delBtn = document.createElement('button');
+      delBtn.textContent = '✕';
+      delBtn.title = 'Delete annotation';
+      delBtn.addEventListener('click', event => {
+        event.stopPropagation();
+        deleteAnnotation(annotation.id);
+      });
+      row.appendChild(delBtn);
+
+      item.appendChild(row);
       list.appendChild(item);
     }
   }
@@ -1845,6 +2201,10 @@ textarea:focus-visible {
   }
 
   function deleteAnnotation(id) {
+    if (isAnnotationLocked(id)) {
+      toast('Unlock the annotation or its layer before deleting');
+      return;
+    }
     const index = appState.annotations.findIndex(a => a.id === id);
     if (index === -1) return;
     appState.annotations.splice(index, 1);
@@ -2010,6 +2370,7 @@ textarea:focus-visible {
     appState.calibration = null;
     appState.history = { stack: [], index: -1 };
     localStorage.removeItem(AUTOSAVE_KEY);
+    resetModifiers();
     scheduleRedraw();
     refreshUI();
     updateMeasurementStatus(null);
@@ -2124,6 +2485,41 @@ textarea:focus-visible {
      Event Wiring
      ========================================== */
 
+  function handleKeyDown(event) {
+    applyModifier(event, true);
+    if (event.target && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) return;
+    if (event.key === 'z' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      if (event.shiftKey) {
+        redo();
+      } else {
+        undo();
+      }
+      return;
+    }
+    if (event.key >= '0' && event.key <= '9') {
+      const index = event.key === '0' ? 9 : Number(event.key) - 1;
+      const tool = TOOL_ORDER[index];
+      if (tool) setTool(tool);
+      return;
+    }
+    if (event.key.toLowerCase() === 'c') {
+      setTool('calibrate');
+      return;
+    }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      if (appState.selection.length) {
+        for (const id of [...appState.selection]) {
+          deleteAnnotation(id);
+        }
+      }
+    }
+  }
+
+  function handleKeyUp(event) {
+    applyModifier(event, false);
+  }
+
   function setupEvents() {
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
@@ -2134,32 +2530,9 @@ textarea:focus-visible {
     canvas.addEventListener('pointercancel', cancelPointer);
     canvas.addEventListener('wheel', handleWheel, { passive: false });
 
-    document.addEventListener('keydown', event => {
-      if (event.target && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) return;
-      if (event.key === 'z' && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault();
-        if (event.shiftKey) {
-          redo();
-        } else {
-          undo();
-        }
-      }
-      if (event.key >= '0' && event.key <= '9') {
-        const index = event.key === '0' ? 9 : Number(event.key) - 1;
-        const tool = TOOL_ORDER[index];
-        if (tool) setTool(tool);
-      }
-      if (event.key.toLowerCase() === 'c') {
-        setTool('calibrate');
-      }
-      if (event.key === 'Delete' || event.key === 'Backspace') {
-        if (appState.selection.length) {
-          for (const id of [...appState.selection]) {
-            deleteAnnotation(id);
-          }
-        }
-      }
-    });
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', resetModifiers);
 
     $('#undo-btn').addEventListener('click', undo);
     $('#redo-btn').addEventListener('click', redo);
