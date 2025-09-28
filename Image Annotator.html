@@ -1103,11 +1103,6 @@ textarea:focus-visible {
     }
 
     if (appState.pointerMode === 'angle') {
-      canvas.setPointerCapture(event.pointerId);
-      appState.pointerId = event.pointerId;
-      if (!appState.draft || appState.draft.type !== 'angle' || appState.draft.geometry.stage === 0) {
-        startDrawing(event);
-      }
       return;
     }
 
@@ -1121,6 +1116,12 @@ textarea:focus-visible {
     const point = toCanvasCoords(event.clientX, event.clientY);
     appState.lastPointer = point;
     updateStatusCoords(point);
+
+    const angleUpdated = updateAngleHover(point);
+    if (appState.pointerMode === 'angle' && appState.pointerId !== event.pointerId) {
+      if (angleUpdated) scheduleRedraw();
+      return;
+    }
 
     if (appState.pointerId !== event.pointerId) {
       scheduleRedraw();
@@ -1170,17 +1171,6 @@ textarea:focus-visible {
         );
       }
       geom.points.push({ ...point });
-      scheduleRedraw();
-      return;
-    }
-
-    if (appState.pointerMode === 'angle' && appState.draft && appState.draft.type === 'angle') {
-      const point = toCanvasCoords(event.clientX, event.clientY);
-      if (appState.draft.geometry.stage === 0) {
-        appState.draft.geometry.b = { ...point };
-      } else {
-        appState.draft.geometry.c = { ...point };
-      }
       scheduleRedraw();
       return;
     }
@@ -1287,7 +1277,7 @@ textarea:focus-visible {
       case 'angle':
         appState.draft = {
           ...base,
-          geometry: { a: { ...start }, b: { ...start }, c: { ...start }, stage: 0 }
+          geometry: { a: { ...start }, b: { ...start }, c: { ...start }, stage: 1 }
         };
         break;
       case 'calibrate':
@@ -1349,13 +1339,7 @@ textarea:focus-visible {
         }
         break;
       case 'angle':
-        if (draft.geometry.stage === 0) {
-          draft.geometry.b = { ...point };
-          updateMeasurementStatus(lengthBetween(draft.geometry.a, draft.geometry.b), 'length');
-        } else {
-          draft.geometry.c = { ...point };
-          updateMeasurementStatus(angleBetween(draft.geometry.a, draft.geometry.b, draft.geometry.c), 'angle');
-        }
+        updateAngleHover(point);
         break;
       case 'calibrate':
         draft.geometry.end = { ...point };
@@ -1420,7 +1404,7 @@ textarea:focus-visible {
       case 'ellipse':
         return Math.abs(draft.geometry.width) > 1 && Math.abs(draft.geometry.height) > 1;
       case 'angle':
-        return draft.geometry.stage === 1;
+        return draft.geometry.stage >= 3;
       case 'calibrate':
         return lengthBetween(draft.geometry.start, draft.geometry.end) > 1;
       default:
@@ -1497,6 +1481,67 @@ textarea:focus-visible {
     } else {
       const label = kind === 'area' ? 'Area' : kind === 'angle' ? 'Angle' : 'Length';
       $('#status-measure').textContent = `${label}: ${formatMeasurement(value, kind)}`;
+    }
+  }
+
+  function createAngleDraft(start) {
+    return {
+      id: createId('ann'),
+      type: 'angle',
+      layerId: 'base',
+      style: {
+        stroke: TOOL_DEFAULTS.stroke,
+        fill: TOOL_DEFAULTS.fill,
+        strokeWidth: TOOL_DEFAULTS.strokeWidth,
+        opacity: TOOL_DEFAULTS.opacity,
+        textColor: TOOL_DEFAULTS.textColor,
+        textSize: TOOL_DEFAULTS.textSize
+      },
+      geometry: {
+        a: { ...start },
+        b: { ...start },
+        c: { ...start },
+        stage: 1
+      }
+    };
+  }
+
+  function updateAngleHover(point) {
+    if (!appState.draft || appState.draft.type !== 'angle') return false;
+    const geom = appState.draft.geometry;
+    if (geom.stage === 1) {
+      geom.b = { ...point };
+      updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
+      return true;
+    }
+    if (geom.stage === 2) {
+      geom.c = { ...point };
+      updateMeasurementStatus(angleBetween(geom.a, geom.b, geom.c), 'angle');
+      return true;
+    }
+    return false;
+  }
+
+  function handleAngleClick(event) {
+    if (appState.pointerMode !== 'angle') return;
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    if (!appState.draft || appState.draft.type !== 'angle') {
+      appState.draft = createAngleDraft(point);
+      scheduleRedraw();
+      return;
+    }
+    const geom = appState.draft.geometry;
+    if (geom.stage === 1) {
+      geom.b = { ...point };
+      geom.stage = 2;
+      updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
+      scheduleRedraw();
+      return;
+    }
+    if (geom.stage === 2) {
+      geom.c = { ...point };
+      geom.stage = 3;
+      finishDrawing();
     }
   }
 
@@ -2000,19 +2045,7 @@ textarea:focus-visible {
     }
   });
 
-  canvas.addEventListener('click', event => {
-    if (!appState.draft || appState.draft.type !== 'angle') return;
-    const point = toCanvasCoords(event.clientX, event.clientY);
-    if (appState.draft.geometry.stage === 0) {
-      appState.draft.geometry.b = point;
-      appState.draft.geometry.stage = 1;
-      updateMeasurementStatus(lengthBetween(appState.draft.geometry.a, point), 'length');
-    } else {
-      appState.draft.geometry.c = point;
-      finishDrawing();
-    }
-    scheduleRedraw();
-  });
+  canvas.addEventListener('click', handleAngleClick);
 
   /* ==========================================
      Tabs & UI
