@@ -209,6 +209,45 @@ main {
   cursor: crosshair;
 }
 
+.ruler {
+  position: absolute;
+  background: #edf0f5;
+  pointer-events: none;
+  box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.08);
+}
+
+#ruler-horizontal {
+  top: 0;
+  left: 24px;
+  right: 0;
+  height: 24px;
+}
+
+#ruler-vertical {
+  top: 24px;
+  bottom: 0;
+  left: 0;
+  width: 24px;
+  box-shadow: inset -1px 0 0 rgba(15, 23, 42, 0.08);
+}
+
+#ruler-corner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 24px;
+  height: 24px;
+  background: #e2e8f0;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
 aside {
   grid-area: sidebar;
   display: flex;
@@ -326,6 +365,13 @@ aside {
   font-size: 12px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+.annotation-coords {
+  display: block;
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 #properties-panel label,
@@ -483,6 +529,9 @@ textarea:focus-visible {
 <main>
   <div id="canvas-container">
     <canvas id="main-canvas" width="1280" height="720" role="img" aria-label="Annotation canvas"></canvas>
+    <canvas id="ruler-horizontal" class="ruler" aria-hidden="true"></canvas>
+    <canvas id="ruler-vertical" class="ruler" aria-hidden="true"></canvas>
+    <div id="ruler-corner" aria-hidden="true">px</div>
   </div>
 </main>
 
@@ -525,6 +574,9 @@ textarea:focus-visible {
   const AUTOSAVE_KEY = 'image-annotator-autosave-v1';
   const TOOL_ORDER = ['select', 'pan', 'point', 'line', 'polyline', 'rect', 'ellipse', 'polygon', 'angle', 'text', 'triangle', 'calibrate'];
   const PATH_TOOLS = new Set(['polyline', 'polygon']);
+  const RULER_SIZE = 24;
+  const TRIANGLE_POINT_LABELS = ['A', 'B', 'C'];
+  const TRIANGLE_SIDE_LABELS = ['AB', 'BC', 'CA'];
   const SNAP_DISTANCE = 10; // screen px
   const VANISH_COLORS = {
     left: '#FDD835',
@@ -779,6 +831,88 @@ textarea:focus-visible {
     return (Math.acos(cos) * 180) / Math.PI;
   }
 
+  function midpoint(a, b) {
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  function normalizeVector(vector) {
+    const length = Math.hypot(vector.x, vector.y);
+    if (!length) return { x: 0, y: 0 };
+    return { x: vector.x / length, y: vector.y / length };
+  }
+
+  function inwardNormal(a, b, centroidPoint) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    if (!length) return { x: 0, y: -1 };
+    let normal = { x: -dy / length, y: dx / length };
+    const mid = midpoint(a, b);
+    const toCentroid = normalizeVector({ x: centroidPoint.x - mid.x, y: centroidPoint.y - mid.y });
+    if (normal.x * toCentroid.x + normal.y * toCentroid.y < 0) {
+      normal = { x: -normal.x, y: -normal.y };
+    }
+    return normal;
+  }
+
+  function angleBisectorDirection(vertex, p1, p2, fallback) {
+    const v1 = normalizeVector({ x: p1.x - vertex.x, y: p1.y - vertex.y });
+    const v2 = normalizeVector({ x: p2.x - vertex.x, y: p2.y - vertex.y });
+    let dir = { x: v1.x + v2.x, y: v1.y + v2.y };
+    const len = Math.hypot(dir.x, dir.y);
+    if (len < 1e-6) {
+      if (fallback) {
+        dir = normalizeVector({ x: fallback.x - vertex.x, y: fallback.y - vertex.y });
+      } else {
+        dir = { x: 0, y: -1 };
+      }
+    } else {
+      dir.x /= len;
+      dir.y /= len;
+    }
+    return dir;
+  }
+
+  function triangleMetrics(points) {
+    if (!points || points.length < 3) return null;
+    const [a, b, c] = points;
+    const centroidPoint = centroid(points);
+    return {
+      sides: [
+        { length: lengthBetween(a, b), points: [a, b] },
+        { length: lengthBetween(b, c), points: [b, c] },
+        { length: lengthBetween(c, a), points: [c, a] }
+      ],
+      angles: [
+        { value: angleBetween(b, a, c), vertex: a, refs: [b, c] },
+        { value: angleBetween(c, b, a), vertex: b, refs: [c, a] },
+        { value: angleBetween(a, c, b), vertex: c, refs: [a, b] }
+      ],
+      area: polygonArea(points),
+      centroid: centroidPoint
+    };
+  }
+
+  function triangleSummary(points) {
+    const metrics = triangleMetrics(points);
+    if (!metrics) return '';
+    const sideText = metrics.sides
+      .map((side, index) => `${TRIANGLE_SIDE_LABELS[index]} ${formatMeasurement(side.length, 'length')}`)
+      .join(', ');
+    const angleText = metrics.angles
+      .map((angle, index) => `${TRIANGLE_POINT_LABELS[index]} ${formatMeasurement(angle.value, 'angle')}`)
+      .join(', ');
+    return `Sides ${sideText} | Angles ${angleText}`;
+  }
+
+  function coordinatesSummary(annotation) {
+    const points = uniquePoints(collectAnnotationPoints(annotation, false));
+    if (!points.length) return '';
+    return points
+      .map((point, index) => `${pointLabelForIndex(annotation.type, index)} ${formatCoordinate(point)}`)
+      .join('  ');
+  }
+
   const ANGLE_SNAP_RADIANS = (15 * Math.PI) / 180;
 
   function constrainPointToAngle(anchor, target, step = ANGLE_SNAP_RADIANS) {
@@ -913,11 +1047,97 @@ textarea:focus-visible {
     return points;
   }
 
+  function collectAnnotationPoints(annotation, isDraft = false) {
+    if (!annotation || !annotation.geometry) return [];
+    const geom = annotation.geometry;
+    const type = annotation.type;
+    switch (type) {
+      case 'point':
+        return geom.x != null && geom.y != null ? [geom] : [];
+      case 'line':
+      case 'calibrate':
+        return [geom.start, geom.end].filter(Boolean);
+      case 'polyline':
+      case 'polygon':
+      case 'triangle': {
+        const pts = geom.points || [];
+        const list = isDraft ? effectivePathPoints(pts) : pts;
+        return list.filter(Boolean);
+      }
+      case 'rect': {
+        const { x, y, width, height } = geom;
+        if ([x, y, width, height].some(v => v == null)) return [];
+        const x2 = x + width;
+        const y2 = y + height;
+        return [
+          { x, y },
+          { x: x2, y },
+          { x: x2, y: y2 },
+          { x, y: y2 }
+        ];
+      }
+      case 'ellipse': {
+        const { x, y, width, height } = geom;
+        if ([x, y, width, height].some(v => v == null)) return [];
+        const x2 = x + width;
+        const y2 = y + height;
+        return [
+          { x, y },
+          { x: x2, y },
+          { x: x2, y: y2 },
+          { x, y: y2 }
+        ];
+      }
+      case 'angle': {
+        const points = [];
+        if (geom.a) points.push(geom.a);
+        if (geom.b) points.push(geom.b);
+        if (geom.c && (!isDraft || geom.stage >= 2)) points.push(geom.c);
+        return points;
+      }
+      case 'text':
+        return geom.position ? [geom.position] : [];
+      default:
+        return [];
+    }
+  }
+
+  function uniquePoints(points) {
+    const seen = new Set();
+    const out = [];
+    for (const point of points) {
+      if (!point) continue;
+      const key = `${Math.round(point.x * 1000) / 1000}|${Math.round(point.y * 1000) / 1000}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(point);
+      }
+    }
+    return out;
+  }
+
+  function formatCoordinate(point) {
+    return `(${formatNumber(point.x, 1)}, ${formatNumber(point.y, 1)})`;
+  }
+
+  function pointLabelForIndex(type, index) {
+    if (type === 'triangle' && index < TRIANGLE_POINT_LABELS.length) {
+      return TRIANGLE_POINT_LABELS[index];
+    }
+    return `P${index + 1}`;
+  }
+
   /* ==========================================
      Rendering
      ========================================== */
 
   const canvas = $('#main-canvas');
+  const canvasContainer = $('#canvas-container');
+  const horizontalRuler = $('#ruler-horizontal');
+  const verticalRuler = $('#ruler-vertical');
+  const rulerCorner = $('#ruler-corner');
+  const rulerCtxH = horizontalRuler.getContext('2d');
+  const rulerCtxV = verticalRuler.getContext('2d');
   const ctx = canvas.getContext('2d');
   let needsRedraw = false;
 
@@ -927,6 +1147,8 @@ textarea:focus-visible {
     appState.viewport.dpr = dpr;
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
+    resizeRulers();
+    drawRulers();
     scheduleRedraw();
   }
 
@@ -935,6 +1157,174 @@ textarea:focus-visible {
       needsRedraw = true;
       requestAnimationFrame(redraw);
     }
+  }
+
+  function resizeRulers() {
+    if (!horizontalRuler || !verticalRuler) return;
+    const rect = canvasContainer.getBoundingClientRect();
+    const dpr = appState.viewport.dpr;
+    const width = Math.max(rect.width - RULER_SIZE, 0);
+    const height = Math.max(rect.height - RULER_SIZE, 0);
+    horizontalRuler.width = Math.max(Math.round(width * dpr), 1);
+    horizontalRuler.height = Math.max(Math.round(RULER_SIZE * dpr), 1);
+    verticalRuler.width = Math.max(Math.round(RULER_SIZE * dpr), 1);
+    verticalRuler.height = Math.max(Math.round(height * dpr), 1);
+  }
+
+  function drawRulers() {
+    if (!horizontalRuler || !verticalRuler) return;
+    drawHorizontalRuler();
+    drawVerticalRuler();
+    if (rulerCorner) {
+      rulerCorner.textContent = appState.calibration ? appState.calibration.unit : 'px';
+    }
+  }
+
+  function drawHorizontalRuler() {
+    const width = horizontalRuler.width;
+    const height = horizontalRuler.height;
+    if (!width || !height) return;
+    const dpr = appState.viewport.dpr;
+    const cssWidth = width / dpr;
+    const cssHeight = height / dpr;
+    const ctx = rulerCtxH;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#edf0f5';
+    ctx.fillRect(0, 0, cssWidth, cssHeight);
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.8)';
+    ctx.beginPath();
+    ctx.moveTo(0, cssHeight - 0.5);
+    ctx.lineTo(cssWidth, cssHeight - 0.5);
+    ctx.stroke();
+
+    const worldPerPixel = appState.viewport.dpr / appState.viewport.zoom;
+    const desiredPx = 80;
+    const rawStep = desiredPx * worldPerPixel;
+    const step = chooseRulerStep(rawStep);
+    if (!Number.isFinite(step) || step <= 0) return;
+
+    const startWorld = screenToWorldX(RULER_SIZE);
+    const endWorld = screenToWorldX(RULER_SIZE + cssWidth);
+    const firstTick = Math.floor(startWorld / step) * step;
+    const stepCss = step * appState.viewport.zoom / appState.viewport.dpr;
+    const majorEvery = step >= 10 ? 1 : 5;
+
+    ctx.strokeStyle = '#94a3b8';
+    ctx.fillStyle = '#475569';
+    ctx.font = '10px/1 sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+
+    for (let value = firstTick; value <= endWorld + step; value += step) {
+      const cssPos = worldToScreenX(value) - RULER_SIZE;
+      if (cssPos < -stepCss) continue;
+      if (cssPos > cssWidth + stepCss) break;
+      const major = isMajorTick(value, step, majorEvery);
+      const tickTop = major ? 0 : cssHeight * 0.45;
+      ctx.beginPath();
+      ctx.moveTo(cssPos + 0.5, cssHeight);
+      ctx.lineTo(cssPos + 0.5, tickTop);
+      ctx.stroke();
+      if (major) {
+        const decimals = step < 1 ? 2 : step < 10 ? 1 : 0;
+        ctx.fillText(formatNumber(value, decimals), cssPos, 2);
+      }
+    }
+  }
+
+  function drawVerticalRuler() {
+    const width = verticalRuler.width;
+    const height = verticalRuler.height;
+    if (!width || !height) return;
+    const dpr = appState.viewport.dpr;
+    const cssWidth = width / dpr;
+    const cssHeight = height / dpr;
+    const ctx = rulerCtxV;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#edf0f5';
+    ctx.fillRect(0, 0, cssWidth, cssHeight);
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.8)';
+    ctx.beginPath();
+    ctx.moveTo(cssWidth - 0.5, 0);
+    ctx.lineTo(cssWidth - 0.5, cssHeight);
+    ctx.stroke();
+
+    const worldPerPixel = appState.viewport.dpr / appState.viewport.zoom;
+    const desiredPx = 80;
+    const rawStep = desiredPx * worldPerPixel;
+    const step = chooseRulerStep(rawStep);
+    if (!Number.isFinite(step) || step <= 0) return;
+
+    const startWorld = screenToWorldY(RULER_SIZE);
+    const endWorld = screenToWorldY(RULER_SIZE + cssHeight);
+    const firstTick = Math.floor(startWorld / step) * step;
+    const stepCss = step * appState.viewport.zoom / appState.viewport.dpr;
+    const majorEvery = step >= 10 ? 1 : 5;
+
+    ctx.strokeStyle = '#94a3b8';
+    ctx.fillStyle = '#475569';
+    ctx.font = '10px/1 sans-serif';
+
+    for (let value = firstTick; value <= endWorld + step; value += step) {
+      const cssPos = worldToScreenY(value) - RULER_SIZE;
+      if (cssPos < -stepCss) continue;
+      if (cssPos > cssHeight + stepCss) break;
+      const major = isMajorTick(value, step, majorEvery);
+      const tickLeft = major ? 0 : cssWidth * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(cssWidth, cssPos + 0.5);
+      ctx.lineTo(cssWidth - tickLeft, cssPos + 0.5);
+      ctx.stroke();
+      if (major) {
+        const decimals = step < 1 ? 2 : step < 10 ? 1 : 0;
+        ctx.save();
+        ctx.translate(cssWidth - 2, cssPos);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(formatNumber(value, decimals), 0, 2);
+        ctx.restore();
+      }
+    }
+  }
+
+  function chooseRulerStep(desired) {
+    if (!Number.isFinite(desired) || desired <= 0) return 10;
+    const base = [1, 2, 5];
+    const power = Math.pow(10, Math.floor(Math.log10(desired)));
+    for (const factor of base) {
+      const candidate = factor * power;
+      if (desired <= candidate) {
+        return candidate;
+      }
+    }
+    return 10 * power;
+  }
+
+  function isMajorTick(value, step, every) {
+    const index = Math.round(value / step);
+    const mod = ((index % every) + every) % every;
+    return mod === 0;
+  }
+
+  function screenToWorldX(css) {
+    return ((css * appState.viewport.dpr) - appState.viewport.panX) / appState.viewport.zoom;
+  }
+
+  function screenToWorldY(css) {
+    return ((css * appState.viewport.dpr) - appState.viewport.panY) / appState.viewport.zoom;
+  }
+
+  function worldToScreenX(world) {
+    return (world * appState.viewport.zoom + appState.viewport.panX) / appState.viewport.dpr;
+  }
+
+  function worldToScreenY(world) {
+    return (world * appState.viewport.zoom + appState.viewport.panY) / appState.viewport.dpr;
   }
 
   function redraw() {
@@ -951,6 +1341,7 @@ textarea:focus-visible {
     drawDraft();
     ctx.restore();
     drawSelectionHandles();
+    drawRulers();
   }
 
   function drawImage() {
@@ -1042,6 +1433,7 @@ textarea:focus-visible {
 
     ctx.restore();
 
+    drawCoordinateLabels(annotation, isDraft);
     if (!isDraft) {
       drawMeasurement(annotation);
     }
@@ -1166,10 +1558,9 @@ textarea:focus-visible {
         break;
       }
       case 'triangle': {
-        const area = polygonArea(annotation.geometry.points);
-        text = formatMeasurement(area, 'area');
-        position = centroid(annotation.geometry.points);
-        break;
+        drawTriangleMeasurements(annotation.geometry.points);
+        ctx.restore();
+        return;
       }
       case 'angle': {
         const { a, b, c } = annotation.geometry;
@@ -1192,19 +1583,57 @@ textarea:focus-visible {
     ctx.restore();
   }
 
+  function drawTriangleMeasurements(points) {
+    const metrics = triangleMetrics(points);
+    if (!metrics) return;
+    for (const side of metrics.sides) {
+      const mid = midpoint(side.points[0], side.points[1]);
+      const normal = inwardNormal(side.points[0], side.points[1], metrics.centroid);
+      drawLabel(mid.x, mid.y, formatMeasurement(side.length, 'length'), {
+        offsetX: normal.x * 14,
+        offsetY: normal.y * 14
+      });
+    }
+    for (const angle of metrics.angles) {
+      const direction = angleBisectorDirection(angle.vertex, angle.refs[0], angle.refs[1], metrics.centroid);
+      drawLabel(angle.vertex.x, angle.vertex.y, formatMeasurement(angle.value, 'angle'), {
+        offsetX: direction.x * 18,
+        offsetY: direction.y * 18
+      });
+    }
+    drawLabel(metrics.centroid.x, metrics.centroid.y, formatMeasurement(metrics.area, 'area'));
+  }
+
+  function drawCoordinateLabels(annotation, isDraft = false) {
+    const points = collectAnnotationPoints(annotation, isDraft);
+    if (!points.length) return;
+    const unique = uniquePoints(points);
+    unique.forEach((point, index) => {
+      const label = `${pointLabelForIndex(annotation.type, index)} ${formatCoordinate(point)}`;
+      drawLabel(point.x, point.y, label, {
+        offsetX: 10,
+        offsetY: -10,
+        align: 'left',
+        baseline: 'bottom'
+      });
+    });
+  }
+
   function centroid(points) {
     if (!points.length) return { x: 0, y: 0 };
     const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
     return { x: sum.x / points.length, y: sum.y / points.length };
   }
 
-  function drawLabel(x, y, text) {
+  function drawLabel(x, y, text, options = {}) {
+    const { offsetX = 0, offsetY = 0, align = 'center', baseline = 'middle' } = options;
     ctx.save();
     ctx.translate(x, y);
     ctx.scale(1 / appState.viewport.zoom, 1 / appState.viewport.zoom);
+    ctx.translate(offsetX, offsetY);
     ctx.font = '12px/1.4 sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
+    ctx.textAlign = align;
+    ctx.textBaseline = baseline;
     ctx.fillStyle = '#111827';
     ctx.strokeStyle = 'rgba(255,255,255,0.85)';
     ctx.lineJoin = 'round';
@@ -1487,7 +1916,7 @@ textarea:focus-visible {
   }
 
   function updateStatusCoords(point) {
-    $('#status-coords').textContent = `x: ${formatNumber(point.x, 1)}, y: ${formatNumber(point.y, 1)}`;
+    $('#status-coords').textContent = `x: ${formatNumber(point.x, 1)} px, y: ${formatNumber(point.y, 1)} px`;
   }
 
   function updateZoomStatus() {
@@ -2287,6 +2716,24 @@ textarea:focus-visible {
       row.appendChild(meta);
     }
 
+    const coordText = coordinatesSummary(annotation);
+    if (coordText) {
+      const coords = document.createElement('span');
+      coords.className = 'layer-meta';
+      coords.textContent = coordText;
+      row.appendChild(coords);
+    }
+
+    if (annotation.type === 'triangle') {
+      const triText = triangleSummary(annotation.geometry.points);
+      if (triText) {
+        const triMeta = document.createElement('span');
+        triMeta.className = 'layer-meta';
+        triMeta.textContent = triText;
+        row.appendChild(triMeta);
+      }
+    }
+
     row.addEventListener('click', () => {
       appState.selection = [annotation.id];
       scheduleRedraw();
@@ -2328,6 +2775,24 @@ textarea:focus-visible {
         measurementEl.className = 'annotation-measurement';
         measurementEl.textContent = `${measurementLabel(measurement.kind)}: ${formatMeasurement(measurement.value, measurement.kind)}`;
         row.appendChild(measurementEl);
+      }
+
+      const coordsText = coordinatesSummary(annotation);
+      if (coordsText) {
+        const coordsEl = document.createElement('span');
+        coordsEl.className = 'annotation-coords';
+        coordsEl.textContent = coordsText;
+        row.appendChild(coordsEl);
+      }
+
+      if (annotation.type === 'triangle') {
+        const triText = triangleSummary(annotation.geometry.points);
+        if (triText) {
+          const triEl = document.createElement('span');
+          triEl.className = 'annotation-coords';
+          triEl.textContent = triText;
+          row.appendChild(triEl);
+        }
       }
 
       const delBtn = document.createElement('button');
