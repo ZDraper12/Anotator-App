@@ -682,7 +682,7 @@ textarea:focus-visible {
 
   const canvas = $('#main-canvas');
   const ctx = canvas.getContext('2d');
-  let needsRedraw = true;
+  let needsRedraw = false;
 
   function resizeCanvas() {
     const rect = canvas.getBoundingClientRect();
