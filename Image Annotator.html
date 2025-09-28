@@ -916,12 +916,16 @@ textarea:focus-visible {
     return `Sides ${sideText} | Angles ${angleText}`;
   }
 
-  function coordinatesSummary(annotation) {
-    const points = uniquePoints(collectAnnotationPoints(annotation, false));
-    if (!points.length) return '';
-    return points
-      .map((point, index) => `${pointLabelForIndex(annotation.type, index)} ${formatCoordinate(point)}`)
-      .join('  ');
+  function rectangleSummary(geometry) {
+    if (!geometry) return '';
+    const { width, height } = geometry;
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return '';
+    const rectWidth = Math.abs(width);
+    const rectHeight = Math.abs(height);
+    if (rectWidth === 0 && rectHeight === 0) return '';
+    const widthText = formatMeasurement(rectWidth, 'length');
+    const heightText = formatMeasurement(rectHeight, 'length');
+    return `W ${widthText} × H ${heightText}`;
   }
 
   const ANGLE_SNAP_RADIANS = (15 * Math.PI) / 180;
@@ -1037,11 +1041,8 @@ textarea:focus-visible {
         }
         return { kind: 'length', value: total };
       }
-      case 'rect': {
-        const { width, height } = annotation.geometry;
-        if (width == null || height == null) return null;
-        return { kind: 'area', value: Math.abs(width * height) };
-      }
+      case 'rect':
+        return null;
       case 'ellipse': {
         const { width, height } = annotation.geometry;
         if (width == null || height == null) return null;
@@ -1133,31 +1134,6 @@ textarea:focus-visible {
       default:
         return [];
     }
-  }
-
-  function uniquePoints(points) {
-    const seen = new Set();
-    const out = [];
-    for (const point of points) {
-      if (!point) continue;
-      const key = `${Math.round(point.x * 1000) / 1000}|${Math.round(point.y * 1000) / 1000}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push(point);
-      }
-    }
-    return out;
-  }
-
-  function formatCoordinate(point) {
-    return `(${formatNumber(point.x, 1)}, ${formatNumber(point.y, 1)})`;
-  }
-
-  function pointLabelForIndex(type, index) {
-    if (type === 'triangle' && index < TRIANGLE_POINT_LABELS.length) {
-      return TRIANGLE_POINT_LABELS[index];
-    }
-    return `P${index + 1}`;
   }
 
   /* ==========================================
@@ -1466,7 +1442,6 @@ textarea:focus-visible {
 
     ctx.restore();
 
-    drawCoordinateLabels(annotation, isDraft);
     if (!isDraft) {
       drawMeasurement(annotation);
     }
@@ -1571,11 +1546,9 @@ textarea:focus-visible {
         break;
       }
       case 'rect': {
-        const { width, height, x, y } = annotation.geometry;
-        const area = Math.abs(width * height);
-        text = formatMeasurement(area, 'area');
-        position = { x: x + width / 2, y: y + height / 2 };
-        break;
+        drawRectangleMeasurements(annotation.geometry);
+        ctx.restore();
+        return;
       }
       case 'ellipse': {
         const { width, height, x, y } = annotation.geometry;
@@ -1616,6 +1589,41 @@ textarea:focus-visible {
     ctx.restore();
   }
 
+  function drawRectangleMeasurements(geometry) {
+    if (!geometry) return;
+    const { x, y, width, height } = geometry;
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height)
+    ) {
+      return;
+    }
+    const x1 = Math.min(x, x + width);
+    const x2 = Math.max(x, x + width);
+    const y1 = Math.min(y, y + height);
+    const y2 = Math.max(y, y + height);
+    const rectWidth = x2 - x1;
+    const rectHeight = y2 - y1;
+
+    if (rectWidth > 0) {
+      const topMid = { x: (x1 + x2) / 2, y: y1 };
+      drawLabel(topMid.x, topMid.y, formatMeasurement(rectWidth, 'length'), {
+        offsetY: -12,
+        baseline: 'bottom'
+      });
+    }
+
+    if (rectHeight > 0) {
+      const rightMid = { x: x2, y: (y1 + y2) / 2 };
+      drawLabel(rightMid.x, rightMid.y, formatMeasurement(rectHeight, 'length'), {
+        offsetX: 12,
+        align: 'left'
+      });
+    }
+  }
+
   function drawTriangleMeasurements(points) {
     const metrics = triangleMetrics(points);
     if (!metrics) return;
@@ -1635,21 +1643,6 @@ textarea:focus-visible {
       });
     }
     drawLabel(metrics.centroid.x, metrics.centroid.y, formatMeasurement(metrics.area, 'area'));
-  }
-
-  function drawCoordinateLabels(annotation, isDraft = false) {
-    const points = collectAnnotationPoints(annotation, isDraft);
-    if (!points.length) return;
-    const unique = uniquePoints(points);
-    unique.forEach((point, index) => {
-      const label = `${pointLabelForIndex(annotation.type, index)} ${formatCoordinate(point)}`;
-      drawLabel(point.x, point.y, label, {
-        offsetX: 10,
-        offsetY: -10,
-        align: 'left',
-        baseline: 'bottom'
-      });
-    });
   }
 
   function centroid(points) {
@@ -2246,7 +2239,10 @@ textarea:focus-visible {
             shift ? constrainCornerToSquare(appState.dragStart, point) : { ...point }
           )
         );
-        updateMeasurementStatus(Math.abs(draft.geometry.width * draft.geometry.height), 'area');
+        updateMeasurementStatus(
+          { width: draft.geometry.width, height: draft.geometry.height },
+          'rectSides'
+        );
         break;
       case 'ellipse':
         draft.geometry = normalizedRect(
@@ -2426,14 +2422,31 @@ textarea:focus-visible {
   }
 
   function updateMeasurementStatus(value, kind = 'length') {
+    const scaleInfo = appState.calibration
+      ? ` (1px = ${formatNumber(appState.calibration.ratio, 6)} ${appState.calibration.unit})`
+      : '';
+    const statusEl = $('#status-measure');
+
+    if (kind === 'rectSides') {
+      if (
+        !value ||
+        !Number.isFinite(value.width) ||
+        !Number.isFinite(value.height)
+      ) {
+        statusEl.textContent = `Measure: –${scaleInfo}`;
+      } else {
+        const widthText = formatMeasurement(Math.abs(value.width), 'length');
+        const heightText = formatMeasurement(Math.abs(value.height), 'length');
+        statusEl.textContent = `Lengths: W ${widthText} × H ${heightText}`;
+      }
+      return;
+    }
+
     if (value == null) {
-      const scaleInfo = appState.calibration
-        ? ` (1px = ${formatNumber(appState.calibration.ratio, 6)} ${appState.calibration.unit})`
-        : '';
-      $('#status-measure').textContent = `Measure: –${scaleInfo}`;
+      statusEl.textContent = `Measure: –${scaleInfo}`;
     } else {
       const label = kind === 'area' ? 'Area' : kind === 'angle' ? 'Angle' : 'Length';
-      $('#status-measure').textContent = `${label}: ${formatMeasurement(value, kind)}`;
+      statusEl.textContent = `${label}: ${formatMeasurement(value, kind)}`;
     }
   }
 
@@ -2702,7 +2715,11 @@ textarea:focus-visible {
       }
       case 'rect': {
         const { width, height } = annotation.geometry;
-        updateMeasurementStatus(Math.abs(width * height), 'area');
+        if (!Number.isFinite(width) || !Number.isFinite(height)) {
+          updateMeasurementStatus(null);
+        } else {
+          updateMeasurementStatus({ width, height }, 'rectSides');
+        }
         break;
       }
       case 'ellipse': {
@@ -3058,14 +3075,6 @@ textarea:focus-visible {
       row.appendChild(meta);
     }
 
-    const coordText = coordinatesSummary(annotation);
-    if (coordText) {
-      const coords = document.createElement('span');
-      coords.className = 'layer-meta';
-      coords.textContent = coordText;
-      row.appendChild(coords);
-    }
-
     if (annotation.type === 'triangle') {
       const triText = triangleSummary(annotation.geometry.points);
       if (triText) {
@@ -3073,6 +3082,16 @@ textarea:focus-visible {
         triMeta.className = 'layer-meta';
         triMeta.textContent = triText;
         row.appendChild(triMeta);
+      }
+    }
+
+    if (annotation.type === 'rect') {
+      const rectText = rectangleSummary(annotation.geometry);
+      if (rectText) {
+        const rectMeta = document.createElement('span');
+        rectMeta.className = 'layer-meta';
+        rectMeta.textContent = rectText;
+        row.appendChild(rectMeta);
       }
     }
 
@@ -3119,14 +3138,6 @@ textarea:focus-visible {
         row.appendChild(measurementEl);
       }
 
-      const coordsText = coordinatesSummary(annotation);
-      if (coordsText) {
-        const coordsEl = document.createElement('span');
-        coordsEl.className = 'annotation-coords';
-        coordsEl.textContent = coordsText;
-        row.appendChild(coordsEl);
-      }
-
       if (annotation.type === 'triangle') {
         const triText = triangleSummary(annotation.geometry.points);
         if (triText) {
@@ -3134,6 +3145,16 @@ textarea:focus-visible {
           triEl.className = 'annotation-coords';
           triEl.textContent = triText;
           row.appendChild(triEl);
+        }
+      }
+
+      if (annotation.type === 'rect') {
+        const rectText = rectangleSummary(annotation.geometry);
+        if (rectText) {
+          const rectEl = document.createElement('span');
+          rectEl.className = 'annotation-coords';
+          rectEl.textContent = rectText;
+          row.appendChild(rectEl);
         }
       }
 
