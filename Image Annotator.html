@@ -422,6 +422,7 @@ textarea:focus-visible {
   <button data-tool="polygon" title="Polygon (8)">⬠</button>
   <button data-tool="angle" title="Angle (9)">∠</button>
   <button data-tool="text" title="Text (0)">T</button>
+  <button data-tool="calibrate" title="Calibrate (C)">⚖︎</button>
 </nav>
 
 <main>
@@ -451,7 +452,7 @@ textarea:focus-visible {
   <div class="status-group">
     <span id="status-coords">x: –, y: –</span>
     <span id="status-zoom">Zoom: 100%</span>
-    <span id="status-measure">Length: –</span>
+    <span id="status-measure">Measure: –</span>
   </div>
   <label class="switch"><input type="checkbox" id="snap-toggle" checked> Snap to points</label>
 </footer>
@@ -467,7 +468,8 @@ textarea:focus-visible {
      ========================================== */
   const SCHEMA_VERSION = 1;
   const AUTOSAVE_KEY = 'image-annotator-autosave-v1';
-  const TOOL_ORDER = ['select', 'pan', 'point', 'line', 'polyline', 'rect', 'ellipse', 'polygon', 'angle', 'text'];
+  const TOOL_ORDER = ['select', 'pan', 'point', 'line', 'polyline', 'rect', 'ellipse', 'polygon', 'angle', 'text', 'calibrate'];
+  const PATH_TOOLS = new Set(['polyline', 'polygon']);
   const SNAP_DISTANCE = 10; // screen px
 
   const TOOL_DEFAULTS = {
@@ -504,6 +506,7 @@ textarea:focus-visible {
       index: -1
     },
     dirty: false,
+    calibration: null,
     pointerMode: 'select',
     pointerId: null,
     dragStart: null,
@@ -582,7 +585,8 @@ textarea:focus-visible {
       },
       settings: deepClone(appState.settings),
       layers: deepClone(appState.layers),
-      annotations: deepClone(appState.annotations)
+      annotations: deepClone(appState.annotations),
+      calibration: appState.calibration ? { ...appState.calibration } : null
     };
   }
 
@@ -604,12 +608,15 @@ textarea:focus-visible {
     appState.viewport.zoom = snapshot.viewport.zoom;
     appState.viewport.panX = snapshot.viewport.panX;
     appState.viewport.panY = snapshot.viewport.panY;
+    appState.settings = deepClone(snapshot.settings || appState.settings);
     appState.layers = deepClone(snapshot.layers);
     appState.annotations = deepClone(snapshot.annotations);
+    appState.calibration = snapshot.calibration ? { ...snapshot.calibration } : null;
     appState.selection = [];
     appState.draft = null;
     scheduleRedraw();
     refreshUI();
+    updateMeasurementStatus(null);
   }
 
   function undo() {
@@ -674,6 +681,35 @@ textarea:focus-visible {
 
   function formatNumber(value, decimals = 2) {
     return parseFloat(value.toFixed(decimals)).toString();
+  }
+
+  function formatMeasurement(value, kind = 'length') {
+    if (value == null) return '–';
+    if (kind === 'angle') {
+      return `${formatNumber(value, 1)}°`;
+    }
+    const calibration = appState.calibration;
+    const decimals = kind === 'area' ? 2 : 2;
+    if (!calibration) {
+      const suffix = kind === 'area' ? 'px²' : 'px';
+      return `${formatNumber(value, decimals)} ${suffix}`;
+    }
+    if (kind === 'area') {
+      const real = value * calibration.ratio * calibration.ratio;
+      return `${formatNumber(real, decimals)} ${calibration.unit}²`;
+    }
+    const real = value * calibration.ratio;
+    return `${formatNumber(real, decimals)} ${calibration.unit}`;
+  }
+
+  function effectivePathPoints(points) {
+    if (points.length < 2) return points;
+    const last = points[points.length - 1];
+    const prev = points[points.length - 2];
+    if (last.x === prev.x && last.y === prev.y) {
+      return points.slice(0, -1);
+    }
+    return points;
   }
 
   /* ==========================================
@@ -749,6 +785,10 @@ textarea:focus-visible {
         drawPoint(annotation.geometry);
         break;
       case 'line':
+        drawLine(annotation.geometry);
+        break;
+      case 'calibrate':
+        ctx.setLineDash([8 / appState.viewport.zoom, 6 / appState.viewport.zoom]);
         drawLine(annotation.geometry);
         break;
       case 'polyline':
@@ -860,7 +900,7 @@ textarea:focus-visible {
     switch (annotation.type) {
       case 'line': {
         const len = lengthBetween(annotation.geometry.start, annotation.geometry.end);
-        text = `${formatNumber(len, 2)} px`;
+        text = formatMeasurement(len, 'length');
         position = {
           x: (annotation.geometry.start.x + annotation.geometry.end.x) / 2,
           y: (annotation.geometry.start.y + annotation.geometry.end.y) / 2
@@ -868,39 +908,39 @@ textarea:focus-visible {
         break;
       }
       case 'polyline': {
-        let total = 0;
         const pts = annotation.geometry.points;
+        let total = 0;
         for (let i = 1; i < pts.length; i++) {
           total += lengthBetween(pts[i - 1], pts[i]);
         }
-        text = `${formatNumber(total, 2)} px`;
+        text = formatMeasurement(total, 'length');
         position = pts[Math.floor(pts.length / 2)] || pts[0];
         break;
       }
       case 'rect': {
         const { width, height, x, y } = annotation.geometry;
         const area = Math.abs(width * height);
-        text = `${formatNumber(area, 2)} px²`;
+        text = formatMeasurement(area, 'area');
         position = { x: x + width / 2, y: y + height / 2 };
         break;
       }
       case 'ellipse': {
         const { width, height, x, y } = annotation.geometry;
         const area = Math.PI * Math.abs(width / 2) * Math.abs(height / 2);
-        text = `${formatNumber(area, 2)} px²`;
+        text = formatMeasurement(area, 'area');
         position = { x: x + width / 2, y: y + height / 2 };
         break;
       }
       case 'polygon': {
         const area = polygonArea(annotation.geometry.points);
-        text = `${formatNumber(area, 2)} px²`;
+        text = formatMeasurement(area, 'area');
         position = centroid(annotation.geometry.points);
         break;
       }
       case 'angle': {
         const { a, b, c } = annotation.geometry;
         const ang = angleBetween(a, b, c);
-        text = `${formatNumber(ang, 1)}°`;
+        text = formatMeasurement(ang, 'angle');
         position = { x: b.x, y: b.y };
         break;
       }
@@ -1029,20 +1069,50 @@ textarea:focus-visible {
 
   function beginPointer(event) {
     if (!canvas.contains(event.target)) return;
-    canvas.setPointerCapture(event.pointerId);
-    appState.pointerId = event.pointerId;
-    appState.dragStart = toCanvasCoords(event.clientX, event.clientY);
-    appState.lastPointer = appState.dragStart;
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    appState.dragStart = point;
+    appState.lastPointer = point;
 
     if (appState.pointerMode === 'pan') {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
       return;
     }
 
     if (appState.pointerMode === 'select') {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
       handleSelectDown(event);
       return;
     }
 
+    if (appState.pointerMode === 'calibrate') {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
+      startDrawing(event);
+      return;
+    }
+
+    if (PATH_TOOLS.has(appState.pointerMode)) {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
+      if (!appState.draft || appState.draft.type !== appState.pointerMode) {
+        startDrawing(event);
+      }
+      return;
+    }
+
+    if (appState.pointerMode === 'angle') {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
+      if (!appState.draft || appState.draft.type !== 'angle' || appState.draft.geometry.stage === 0) {
+        startDrawing(event);
+      }
+      return;
+    }
+
+    canvas.setPointerCapture(event.pointerId);
+    appState.pointerId = event.pointerId;
     startDrawing(event);
   }
 
@@ -1086,6 +1156,35 @@ textarea:focus-visible {
       return;
     }
 
+    if (PATH_TOOLS.has(appState.pointerMode) && appState.draft && appState.draft.type === appState.pointerMode) {
+      const point = toCanvasCoords(event.clientX, event.clientY);
+      const geom = appState.draft.geometry;
+      geom.points[geom.points.length - 1] = { ...point };
+      const effective = effectivePathPoints(geom.points);
+      if (appState.pointerMode === 'polyline') {
+        updatePolylineMeasurement(effective);
+      } else {
+        updateMeasurementStatus(
+          effective.length >= 3 ? polygonArea(effective) : null,
+          'area'
+        );
+      }
+      geom.points.push({ ...point });
+      scheduleRedraw();
+      return;
+    }
+
+    if (appState.pointerMode === 'angle' && appState.draft && appState.draft.type === 'angle') {
+      const point = toCanvasCoords(event.clientX, event.clientY);
+      if (appState.draft.geometry.stage === 0) {
+        appState.draft.geometry.b = { ...point };
+      } else {
+        appState.draft.geometry.c = { ...point };
+      }
+      scheduleRedraw();
+      return;
+    }
+
     finishDrawing();
   }
 
@@ -1095,6 +1194,7 @@ textarea:focus-visible {
       appState.pointerId = null;
       appState.draft = null;
       scheduleRedraw();
+      updateMeasurementStatus(null);
     }
   }
 
@@ -1163,7 +1263,7 @@ textarea:focus-visible {
       case 'polyline':
         appState.draft = {
           ...base,
-          geometry: { points: [{ ...start }] }
+          geometry: { points: [{ ...start }, { ...start }] }
         };
         break;
       case 'rect':
@@ -1181,13 +1281,20 @@ textarea:focus-visible {
       case 'polygon':
         appState.draft = {
           ...base,
-          geometry: { points: [{ ...start }] }
+          geometry: { points: [{ ...start }, { ...start }] }
         };
         break;
       case 'angle':
         appState.draft = {
           ...base,
           geometry: { a: { ...start }, b: { ...start }, c: { ...start }, stage: 0 }
+        };
+        break;
+      case 'calibrate':
+        appState.draft = {
+          ...base,
+          type: 'calibrate',
+          geometry: { start: { ...start }, end: { ...start } }
         };
         break;
       case 'text': {
@@ -1218,40 +1325,75 @@ textarea:focus-visible {
         break;
       case 'line':
         draft.geometry.end = { ...point };
-        updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end));
+        updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end), 'length');
         break;
       case 'polyline':
         draft.geometry.points[draft.geometry.points.length - 1] = { ...point };
-        updatePolylineMeasurement(draft.geometry.points);
+        updatePolylineMeasurement(effectivePathPoints(draft.geometry.points));
         break;
       case 'rect':
         draft.geometry = normalizedRect(appState.dragStart, point);
-        updateMeasurementStatus(Math.abs(draft.geometry.width * draft.geometry.height));
+        updateMeasurementStatus(Math.abs(draft.geometry.width * draft.geometry.height), 'area');
         break;
       case 'ellipse':
         draft.geometry = normalizedRect(appState.dragStart, point);
-        updateMeasurementStatus(Math.PI * Math.abs(draft.geometry.width / 2) * Math.abs(draft.geometry.height / 2));
+        updateMeasurementStatus(Math.PI * Math.abs(draft.geometry.width / 2) * Math.abs(draft.geometry.height / 2), 'area');
         break;
       case 'polygon':
         draft.geometry.points[draft.geometry.points.length - 1] = { ...point };
-        updateMeasurementStatus(polygonArea(draft.geometry.points));
+        const polyPoints = effectivePathPoints(draft.geometry.points);
+        if (polyPoints.length >= 3) {
+          updateMeasurementStatus(polygonArea(polyPoints), 'area');
+        } else {
+          updateMeasurementStatus(null, 'area');
+        }
         break;
       case 'angle':
         if (draft.geometry.stage === 0) {
           draft.geometry.b = { ...point };
-          updateMeasurementStatus(lengthBetween(draft.geometry.a, draft.geometry.b));
+          updateMeasurementStatus(lengthBetween(draft.geometry.a, draft.geometry.b), 'length');
         } else {
           draft.geometry.c = { ...point };
-          updateMeasurementStatus(angleBetween(draft.geometry.a, draft.geometry.b, draft.geometry.c));
+          updateMeasurementStatus(angleBetween(draft.geometry.a, draft.geometry.b, draft.geometry.c), 'angle');
         }
+        break;
+      case 'calibrate':
+        draft.geometry.end = { ...point };
+        updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end), 'length');
         break;
     }
     scheduleRedraw();
   }
 
+  function trimDraftGeometry(draft) {
+    if (!draft) return;
+    if (PATH_TOOLS.has(draft.type)) {
+      const pts = draft.geometry.points;
+      if (pts.length >= 2) {
+        const last = pts[pts.length - 1];
+        const prev = pts[pts.length - 2];
+        if (last.x === prev.x && last.y === prev.y) {
+          pts.pop();
+        }
+      }
+    }
+  }
+
   function finishDrawing() {
     if (!appState.draft) return;
     const draft = appState.draft;
+    trimDraftGeometry(draft);
+
+    if (draft.type === 'calibrate') {
+      const success = applyCalibration(draft);
+      appState.draft = null;
+      scheduleRedraw();
+      if (!success) {
+        updateMeasurementStatus(null);
+      }
+      return;
+    }
+
     if (!validateDraft(draft)) {
       toast('Incomplete annotation discarded');
       appState.draft = null;
@@ -1279,6 +1421,8 @@ textarea:focus-visible {
         return Math.abs(draft.geometry.width) > 1 && Math.abs(draft.geometry.height) > 1;
       case 'angle':
         return draft.geometry.stage === 1;
+      case 'calibrate':
+        return lengthBetween(draft.geometry.start, draft.geometry.end) > 1;
       default:
         return true;
     }
@@ -1297,6 +1441,41 @@ textarea:focus-visible {
     refreshUI();
   }
 
+  function applyCalibration(draft) {
+    const distance = lengthBetween(draft.geometry.start, draft.geometry.end);
+    if (distance <= 0) {
+      toast('Calibration distance too small');
+      return false;
+    }
+    const defaultDistance = appState.calibration
+      ? formatNumber(distance * appState.calibration.ratio, 2)
+      : '';
+    const valueInput = prompt('Enter real-world distance for the selected span', defaultDistance);
+    if (valueInput == null) {
+      toast('Calibration cancelled');
+      return false;
+    }
+    const value = Number(valueInput);
+    if (!Number.isFinite(value) || value <= 0) {
+      toast('Calibration requires a positive number');
+      return false;
+    }
+    const unitInput = prompt('Enter unit (e.g., mm, cm, m, in, ft)', appState.calibration?.unit || 'cm');
+    if (unitInput == null || !unitInput.trim()) {
+      toast('Calibration requires a unit');
+      return false;
+    }
+    appState.calibration = {
+      ratio: value / distance,
+      unit: unitInput.trim()
+    };
+    pushHistory('Set calibration');
+    updateMeasurementStatus(null);
+    toast(`Scale set to ${formatNumber(appState.calibration.ratio, 4)} ${appState.calibration.unit}/px`);
+    setTool('select');
+    return true;
+  }
+
   function updatePolylineMeasurement(points) {
     if (points.length < 2) {
       updateMeasurementStatus(null);
@@ -1306,14 +1485,18 @@ textarea:focus-visible {
     for (let i = 1; i < points.length; i++) {
       total += lengthBetween(points[i - 1], points[i]);
     }
-    updateMeasurementStatus(total);
+    updateMeasurementStatus(total, 'length');
   }
 
-  function updateMeasurementStatus(value) {
+  function updateMeasurementStatus(value, kind = 'length') {
     if (value == null) {
-      $('#status-measure').textContent = 'Length: –';
+      const scaleInfo = appState.calibration
+        ? ` (1px = ${formatNumber(appState.calibration.ratio, 6)} ${appState.calibration.unit})`
+        : '';
+      $('#status-measure').textContent = `Measure: –${scaleInfo}`;
     } else {
-      $('#status-measure').textContent = `Measure: ${formatNumber(value, 2)}`;
+      const label = kind === 'area' ? 'Area' : kind === 'angle' ? 'Angle' : 'Length';
+      $('#status-measure').textContent = `${label}: ${formatMeasurement(value, kind)}`;
     }
   }
 
@@ -1725,10 +1908,12 @@ textarea:focus-visible {
     appState.layers = [{ id: 'base', name: 'Annotations', visible: true, locked: false, children: [] }];
     appState.selection = [];
     appState.draft = null;
+    appState.calibration = null;
     appState.history = { stack: [], index: -1 };
     localStorage.removeItem(AUTOSAVE_KEY);
     scheduleRedraw();
     refreshUI();
+    updateMeasurementStatus(null);
     toast('Canvas reset');
   }
 
@@ -1810,27 +1995,23 @@ textarea:focus-visible {
 
   canvas.addEventListener('dblclick', event => {
     if (!appState.draft) return;
-    if (['polyline', 'polygon'].includes(appState.draft.type)) {
+    if (PATH_TOOLS.has(appState.draft.type)) {
       finishDrawing();
     }
   });
 
   canvas.addEventListener('click', event => {
-    if (!appState.draft) return;
+    if (!appState.draft || appState.draft.type !== 'angle') return;
     const point = toCanvasCoords(event.clientX, event.clientY);
-    if (appState.draft.type === 'polyline' || appState.draft.type === 'polygon') {
-      appState.draft.geometry.points.push(point);
-      scheduleRedraw();
-    } else if (appState.draft.type === 'angle') {
-      if (appState.draft.geometry.stage === 0) {
-        appState.draft.geometry.b = point;
-        appState.draft.geometry.stage = 1;
-      } else {
-        appState.draft.geometry.c = point;
-        finishDrawing();
-      }
-      scheduleRedraw();
+    if (appState.draft.geometry.stage === 0) {
+      appState.draft.geometry.b = point;
+      appState.draft.geometry.stage = 1;
+      updateMeasurementStatus(lengthBetween(appState.draft.geometry.a, point), 'length');
+    } else {
+      appState.draft.geometry.c = point;
+      finishDrawing();
     }
+    scheduleRedraw();
   });
 
   /* ==========================================
@@ -1880,6 +2061,9 @@ textarea:focus-visible {
         const index = event.key === '0' ? 9 : Number(event.key) - 1;
         const tool = TOOL_ORDER[index];
         if (tool) setTool(tool);
+      }
+      if (event.key.toLowerCase() === 'c') {
+        setTool('calibrate');
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         if (appState.selection.length) {
@@ -2011,6 +2195,7 @@ textarea:focus-visible {
     recoverAutosave();
     refreshUI();
     updateZoomStatus();
+    updateMeasurementStatus(null);
     scheduleRedraw();
   }
 
