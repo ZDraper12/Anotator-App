@@ -447,6 +447,14 @@ textarea:focus-visible {
         <button data-view="actual">Actual Pixels</button>
       </div>
     </div>
+    <div class="menu" id="settings-menu" aria-haspopup="true" aria-expanded="false">
+      <button class="menu-trigger" aria-controls="settings-menu-content">Settings ▾</button>
+      <div class="menu-content" id="settings-menu-content" role="menu">
+        <button data-action="set-vanishing" data-axis="left">Set Left Vanishing Point…</button>
+        <button data-action="set-vanishing" data-axis="right">Set Right Vanishing Point…</button>
+        <button data-action="set-vanishing" data-axis="vertical">Set Vertical Vanishing Point…</button>
+      </div>
+    </div>
     <input type="file" id="hidden-image-input" accept="image/*" class="hidden">
     <input type="file" id="hidden-project-input" accept="application/json" class="hidden">
   </div>
@@ -465,9 +473,11 @@ textarea:focus-visible {
   <button data-tool="rect" title="Rectangle (6)">▭</button>
   <button data-tool="ellipse" title="Ellipse (7)">◯</button>
   <button data-tool="polygon" title="Polygon (8)">⬠</button>
+  <button data-tool="triangle" title="Triangle">△</button>
   <button data-tool="angle" title="Angle (9)">∠</button>
   <button data-tool="text" title="Text (0)">T</button>
   <button data-tool="calibrate" title="Calibrate (C)">⚖︎</button>
+  <button data-action="extend-vp" title="Extend Lines to Vanishing Points">⇱</button>
 </nav>
 
 <main>
@@ -513,9 +523,14 @@ textarea:focus-visible {
      ========================================== */
   const SCHEMA_VERSION = 1;
   const AUTOSAVE_KEY = 'image-annotator-autosave-v1';
-  const TOOL_ORDER = ['select', 'pan', 'point', 'line', 'polyline', 'rect', 'ellipse', 'polygon', 'angle', 'text', 'calibrate'];
+  const TOOL_ORDER = ['select', 'pan', 'point', 'line', 'polyline', 'rect', 'ellipse', 'polygon', 'angle', 'text', 'triangle', 'calibrate'];
   const PATH_TOOLS = new Set(['polyline', 'polygon']);
   const SNAP_DISTANCE = 10; // screen px
+  const VANISH_COLORS = {
+    left: '#FDD835',
+    right: '#E53935',
+    vertical: '#1E88E5'
+  };
 
   const TOOL_DEFAULTS = {
     stroke: '#2563eb',
@@ -552,6 +567,7 @@ textarea:focus-visible {
     },
     dirty: false,
     calibration: null,
+    vanishingPoints: defaultVanishingPoints(),
     pointerMode: 'select',
     pointerId: null,
     dragStart: null,
@@ -560,10 +576,19 @@ textarea:focus-visible {
   };
 
   let autosaveTimer = null;
-
+  let activeHandle = null;
+  
   /* ==========================================
      Utilities
      ========================================== */
+
+  function defaultVanishingPoints() {
+    return {
+      left: { x: -500, y: 0 },
+      right: { x: 500, y: 0 },
+      vertical: { x: 0, y: -500 }
+    };
+  }
 
   const $ = sel => document.querySelector(sel);
   const $$ = sel => Array.from(document.querySelectorAll(sel));
@@ -653,7 +678,8 @@ textarea:focus-visible {
       settings: deepClone(appState.settings),
       layers: deepClone(appState.layers),
       annotations: deepClone(appState.annotations),
-      calibration: appState.calibration ? { ...appState.calibration } : null
+      calibration: appState.calibration ? { ...appState.calibration } : null,
+      vanishingPoints: deepClone(appState.vanishingPoints)
     };
   }
 
@@ -683,9 +709,11 @@ textarea:focus-visible {
       locked: !!annotation.locked
     }));
     appState.calibration = snapshot.calibration ? { ...snapshot.calibration } : null;
+    appState.vanishingPoints = deepClone(snapshot.vanishingPoints || defaultVanishingPoints());
     appState.selection = [];
     appState.draft = null;
     resetModifiers();
+    activeHandle = null;
     scheduleRedraw();
     refreshUI();
     updateMeasurementStatus(null);
@@ -809,6 +837,7 @@ textarea:focus-visible {
     rect: 'Rectangle',
     ellipse: 'Ellipse',
     polygon: 'Polygon',
+    triangle: 'Triangle',
     angle: 'Angle',
     text: 'Text'
   };
@@ -855,6 +884,11 @@ textarea:focus-visible {
         };
       }
       case 'polygon': {
+        const pts = annotation.geometry.points;
+        if (!pts || pts.length < 3) return null;
+        return { kind: 'area', value: polygonArea(pts) };
+      }
+      case 'triangle': {
         const pts = annotation.geometry.points;
         if (!pts || pts.length < 3) return null;
         return { kind: 'area', value: polygonArea(pts) };
@@ -912,6 +946,7 @@ textarea:focus-visible {
     ctx.scale(appState.viewport.zoom, appState.viewport.zoom);
 
     drawImage();
+    drawVanishingPoints();
     drawAnnotations();
     drawDraft();
     ctx.restore();
@@ -923,6 +958,30 @@ textarea:focus-visible {
     ctx.save();
     ctx.globalAlpha = 1;
     ctx.drawImage(appState.image, 0, 0);
+    ctx.restore();
+  }
+
+  function drawVanishingPoints() {
+    ctx.save();
+    const zoom = appState.viewport.zoom;
+    const radius = 6 / zoom;
+    const cross = 12 / zoom;
+    for (const [axis, point] of Object.entries(appState.vanishingPoints)) {
+      if (!point) continue;
+      const color = VANISH_COLORS[axis] || '#111827';
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 2 / zoom;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(point.x - cross / 2, point.y);
+      ctx.lineTo(point.x + cross / 2, point.y);
+      ctx.moveTo(point.x, point.y - cross / 2);
+      ctx.lineTo(point.x, point.y + cross / 2);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
@@ -968,6 +1027,9 @@ textarea:focus-visible {
         drawEllipse(annotation.geometry);
         break;
       case 'polygon':
+        drawPolygon(annotation.geometry);
+        break;
+      case 'triangle':
         drawPolygon(annotation.geometry);
         break;
       case 'angle':
@@ -1103,6 +1165,12 @@ textarea:focus-visible {
         position = centroid(annotation.geometry.points);
         break;
       }
+      case 'triangle': {
+        const area = polygonArea(annotation.geometry.points);
+        text = formatMeasurement(area, 'area');
+        position = centroid(annotation.geometry.points);
+        break;
+      }
       case 'angle': {
         const { a, b, c } = annotation.geometry;
         const ang = angleBetween(a, b, c);
@@ -1166,8 +1234,27 @@ textarea:focus-visible {
       ctx2.setLineDash([6 / zoom, 6 / zoom]);
       ctx2.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
       ctx2.restore();
+      if (annotation.type === 'triangle') {
+        drawTriangleHandles(ctx2, annotation.geometry.points, zoom);
+      }
     }
     ctx2.restore();
+  }
+
+  function drawTriangleHandles(context, points, zoom) {
+    if (!points || !points.length) return;
+    context.save();
+    const size = 8 / zoom;
+    context.fillStyle = '#2563eb';
+    context.strokeStyle = '#ffffff';
+    context.lineWidth = 1 / zoom;
+    for (const pt of points) {
+      context.beginPath();
+      context.rect(pt.x - size / 2, pt.y - size / 2, size, size);
+      context.fill();
+      context.stroke();
+    }
+    context.restore();
   }
 
   function annotationBounds(annotation) {
@@ -1187,7 +1274,8 @@ textarea:focus-visible {
         return annotation.geometry;
       }
       case 'polyline':
-      case 'polygon': {
+      case 'polygon':
+      case 'triangle': {
         const xs = annotation.geometry.points.map(p => p.x);
         const ys = annotation.geometry.points.map(p => p.y);
         const minX = Math.min(...xs);
@@ -1370,6 +1458,7 @@ textarea:focus-visible {
       canvas.releasePointerCapture(event.pointerId);
       appState.pointerId = null;
       appState.draft = null;
+      activeHandle = null;
       scheduleRedraw();
       updateMeasurementStatus(null);
     }
@@ -1461,6 +1550,12 @@ textarea:focus-visible {
           geometry: { points: [{ ...start }, { ...start }] }
         };
         break;
+      case 'triangle':
+        appState.draft = {
+          ...base,
+          geometry: { points: [{ ...start }, { ...start }, { ...start }] }
+        };
+        break;
       case 'angle':
         appState.draft = {
           ...base,
@@ -1542,6 +1637,16 @@ textarea:focus-visible {
           updateMeasurementStatus(null, 'area');
         }
         break;
+      case 'triangle': {
+        const rect = normalizedRect(appState.dragStart, point);
+        const apex = { x: rect.x + rect.width / 2, y: rect.y };
+        const left = { x: rect.x, y: rect.y + rect.height };
+        const right = { x: rect.x + rect.width, y: rect.y + rect.height };
+        draft.geometry.points = [left, right, apex];
+        const area = Math.abs(rect.width * rect.height) / 2;
+        updateMeasurementStatus(area, 'area');
+        break;
+      }
       case 'angle':
         updateAngleHover(point, event);
         break;
@@ -1606,6 +1711,9 @@ textarea:focus-visible {
         return draft.geometry.points.length >= 2;
       case 'polygon':
         return draft.geometry.points.length >= 3;
+      case 'triangle':
+        if (!draft.geometry.points || draft.geometry.points.length < 3) return false;
+        return Math.abs(polygonArea(draft.geometry.points)) > 1;
       case 'rect':
       case 'ellipse':
         return Math.abs(draft.geometry.width) > 1 && Math.abs(draft.geometry.height) > 1;
@@ -1765,15 +1873,50 @@ textarea:focus-visible {
 
   /* Selection */
 
+  function findTriangleHandle(point) {
+    const threshold = 10 / appState.viewport.zoom;
+    for (let i = appState.annotations.length - 1; i >= 0; i--) {
+      const annotation = appState.annotations[i];
+      if (annotation.type !== 'triangle') continue;
+      if (!isAnnotationVisible(annotation.id)) continue;
+      if (isAnnotationLocked(annotation.id)) continue;
+      const pts = annotation.geometry.points || [];
+      for (let index = 0; index < pts.length; index++) {
+        const pt = pts[index];
+        if (!pt) continue;
+        const dist = Math.hypot(point.x - pt.x, point.y - pt.y);
+        if (dist <= threshold) {
+          return { annotation, index };
+        }
+      }
+    }
+    return null;
+  }
+
   function handleSelectDown(event) {
-    const hit = hitTest(toCanvasCoords(event.clientX, event.clientY));
+    activeHandle = null;
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    const handle = findTriangleHandle(point);
+    if (handle) {
+      activeHandle = handle;
+      if (!appState.selection.includes(handle.annotation.id)) {
+        appState.selection = [handle.annotation.id];
+      }
+      appState.dragStart = point;
+      appState.lastPointer = point;
+      refreshUI();
+      scheduleRedraw();
+      return;
+    }
+
+    const hit = hitTest(point);
     if (hit) {
       if (!isShiftPressed(event)) {
         appState.selection = [hit.id];
       } else if (!appState.selection.includes(hit.id)) {
         appState.selection.push(hit.id);
       }
-      appState.dragStart = toCanvasCoords(event.clientX, event.clientY);
+      appState.dragStart = point;
       appState.lastPointer = appState.dragStart;
     } else {
       appState.selection = [];
@@ -1784,6 +1927,20 @@ textarea:focus-visible {
 
   function handleSelectMove(event, point) {
     if (!appState.selection.length || !event.buttons) return;
+    if (activeHandle) {
+      const annotation = activeHandle.annotation;
+      if (!annotation || isAnnotationLocked(annotation.id)) return;
+      const target = annotation.geometry.points?.[activeHandle.index];
+      if (!target) return;
+      target.x = point.x;
+      target.y = point.y;
+      if (annotation.geometry.points?.length >= 3) {
+        updateMeasurementStatus(polygonArea(annotation.geometry.points), 'area');
+      }
+      appState.lastPointer = point;
+      scheduleRedraw();
+      return;
+    }
     const dx = point.x - appState.lastPointer.x;
     const dy = point.y - appState.lastPointer.y;
     if (!dx && !dy) return;
@@ -1798,6 +1955,12 @@ textarea:focus-visible {
   }
 
   function handleSelectUp(event) {
+    if (activeHandle) {
+      pushHistory('Adjust triangle vertex');
+      activeHandle = null;
+      updateMeasurementStatus(null);
+      return;
+    }
     if (event.detail === 2) {
       const hit = hitTest(toCanvasCoords(event.clientX, event.clientY));
       if (hit && hit.type === 'text') {
@@ -1827,6 +1990,7 @@ textarea:focus-visible {
         break;
       case 'polyline':
       case 'polygon':
+      case 'triangle':
         for (const p of annotation.geometry.points) {
           p.x += dx;
           p.y += dy;
@@ -1849,6 +2013,54 @@ textarea:focus-visible {
         annotation.geometry.position.x += dx;
         annotation.geometry.position.y += dy;
         break;
+    }
+  }
+
+  function classifyLineAxis(annotation) {
+    const { start, end } = annotation.geometry;
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      return dx >= 0 ? 'right' : 'left';
+    }
+    return 'vertical';
+  }
+
+  function extendSelectedLinesToVanishingPoints() {
+    const targets = appState.selection
+      .map(id => appState.annotations.find(a => a && a.id === id))
+      .filter(annotation => annotation && annotation.type === 'line' && !isAnnotationLocked(annotation.id));
+    if (!targets.length) {
+      toast('Select one or more unlocked lines to extend');
+      return;
+    }
+
+    let changed = false;
+    for (const line of targets) {
+      const lineLength = lengthBetween(line.geometry.start, line.geometry.end);
+      if (lineLength < 0.01) continue;
+      const axis = classifyLineAxis(line);
+      const vp = appState.vanishingPoints?.[axis];
+      if (!vp) continue;
+      const startDist = lengthBetween(line.geometry.start, vp);
+      const endDist = lengthBetween(line.geometry.end, vp);
+      if (startDist >= endDist) {
+        line.geometry.start = { ...vp };
+      } else {
+        line.geometry.end = { ...vp };
+      }
+      line.style.stroke = VANISH_COLORS[axis] || line.style.stroke;
+      changed = true;
+    }
+
+    if (changed) {
+      pushHistory('Extend lines to vanishing points');
+      scheduleRedraw();
+      refreshUI();
+      updateMeasurementStatus(null);
+      toast('Lines extended to vanishing points');
+    } else {
+      toast('Set vanishing points before extending lines');
     }
   }
 
@@ -2310,6 +2522,16 @@ textarea:focus-visible {
         context.fill();
         context.stroke();
         break;
+      case 'triangle':
+        context.beginPath();
+        annotation.geometry.points.forEach((pt, idx) => {
+          if (idx === 0) context.moveTo(pt.x, pt.y);
+          else context.lineTo(pt.x, pt.y);
+        });
+        context.closePath();
+        context.fill();
+        context.stroke();
+        break;
       case 'angle':
         context.beginPath();
         context.moveTo(annotation.geometry.a.x, annotation.geometry.a.y);
@@ -2368,9 +2590,11 @@ textarea:focus-visible {
     appState.selection = [];
     appState.draft = null;
     appState.calibration = null;
+    appState.vanishingPoints = defaultVanishingPoints();
     appState.history = { stack: [], index: -1 };
     localStorage.removeItem(AUTOSAVE_KEY);
     resetModifiers();
+    activeHandle = null;
     scheduleRedraw();
     refreshUI();
     updateMeasurementStatus(null);
@@ -2538,8 +2762,15 @@ textarea:focus-visible {
     $('#redo-btn').addEventListener('click', redo);
 
     $('#tool-palette').addEventListener('click', event => {
-      if (event.target.tagName !== 'BUTTON') return;
-      setTool(event.target.dataset.tool);
+      const button = event.target.closest('button');
+      if (!button) return;
+      if (button.dataset.action) {
+        handleToolAction(button.dataset.action);
+        return;
+      }
+      if (button.dataset.tool) {
+        setTool(button.dataset.tool);
+      }
     });
 
     $('#snap-toggle').addEventListener('change', event => {
@@ -2562,7 +2793,7 @@ textarea:focus-visible {
       });
       menu.querySelectorAll('.menu-content button').forEach(btn => {
         btn.addEventListener('click', () => {
-          handleMenuAction(btn.dataset.action, btn.dataset.view);
+          handleMenuAction(btn);
           closeMenus();
         });
       });
@@ -2579,7 +2810,10 @@ textarea:focus-visible {
     $$('header .menu').forEach(menu => menu.setAttribute('aria-expanded', 'false'));
   }
 
-  function handleMenuAction(action, viewPreset) {
+  function handleMenuAction(button) {
+    const action = button.dataset.action;
+    const viewPreset = button.dataset.view;
+    const axis = button.dataset.axis;
     switch (action) {
       case 'open-image':
         $('#hidden-image-input').click();
@@ -2596,11 +2830,47 @@ textarea:focus-visible {
       case 'reset':
         resetCanvas();
         break;
+      case 'set-vanishing':
+        if (axis) {
+          promptVanishingPoint(axis);
+        }
+        break;
       default:
         if (viewPreset) {
           setViewPreset(viewPreset);
         }
     }
+  }
+
+  function handleToolAction(action) {
+    switch (action) {
+      case 'extend-vp':
+        extendSelectedLinesToVanishingPoints();
+        break;
+    }
+  }
+
+  function promptVanishingPoint(axis) {
+    const labels = { left: 'Left', right: 'Right', vertical: 'Vertical' };
+    const current = appState.vanishingPoints?.[axis] || { x: 0, y: 0 };
+    const fallback = `${formatNumber(current.x, 1)}, ${formatNumber(current.y, 1)}`;
+    const input = prompt(`Enter ${labels[axis] || axis} vanishing point as "x,y"`, fallback);
+    if (input == null) return;
+    const parts = input.split(',').map(part => part.trim());
+    if (parts.length !== 2) {
+      toast('Enter coordinates as "x,y"');
+      return;
+    }
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      toast('Invalid coordinates');
+      return;
+    }
+    appState.vanishingPoints[axis] = { x, y };
+    scheduleRedraw();
+    scheduleAutosave();
+    toast(`${labels[axis] || axis} vanishing point updated`);
   }
 
   function setupDragAndDrop() {
