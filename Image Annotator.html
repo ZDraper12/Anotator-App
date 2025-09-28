@@ -1,0 +1,3908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Image Annotator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+/* ==========================================
+   Change Log
+   ------------------------------------------
+   2024-05-18 v1.0.0
+   - Rebuilt Image Annotator with a simplified but reliable toolset:
+     image loading, zoom/pan, drawing tools, measurements, layers,
+     undo/redo, autosave, and PNG/JSON export.
+   ========================================== */
+
+/* ==========================================
+   Manual QA Script
+   ------------------------------------------
+   1. Open the HTML file in a modern browser.
+   2. Drag an image onto the canvas (or use File → Open Image) and
+      verify it appears with zoom/pan controls operational.
+   3. Use the toolbar tools to draw lines, rectangles, ellipses,
+      polygons, angles, and text; confirm measurements display.
+   4. Toggle snapping via the footer switch and ensure cursor snaps
+      to existing vertices when enabled.
+   5. Select annotations in the canvas or Layers panel and move/duplicate
+      them; confirm undo/redo works for each action.
+   6. Open the Properties tab to adjust stroke/fill/opacity for the
+      selected annotation; confirm live updates.
+   7. Export PNG and JSON via File menu and re-import the JSON to recover
+      the project.
+   8. Reload the page to confirm autosave recovery.
+   ========================================== */
+
+:root {
+  color-scheme: light;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  --bg-main: #f3f5f7;
+  --bg-panel: rgba(255, 255, 255, 0.96);
+  --bg-toolbar: #ffffff;
+  --border: #d0d5dc;
+  --border-strong: #9aa4b2;
+  --text: #1f2933;
+  --text-muted: #52606d;
+  --accent: #2563eb;
+  --accent-soft: rgba(37, 99, 235, 0.14);
+  --focus: rgba(37, 99, 235, 0.4);
+  --shadow: 0 8px 24px rgba(15, 23, 42, 0.1);
+  --layer-selected: rgba(37, 99, 235, 0.1);
+  --toast: rgba(15, 23, 42, 0.8);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg-main);
+  color: var(--text);
+  overflow: hidden;
+}
+
+body {
+  display: grid;
+  grid-template-columns: 64px 1fr 320px;
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "header header header"
+    "tools canvas sidebar"
+    "footer footer footer";
+}
+
+header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg-toolbar);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+  z-index: 10;
+}
+
+header h1 {
+  font-size: 16px;
+  margin: 0 16px 0 0;
+  font-weight: 600;
+}
+
+.toolbar {
+  display: flex;
+  gap: 6px;
+}
+
+.toolbar button,
+.toolbar .menu-trigger {
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.toolbar button:hover,
+.toolbar .menu-trigger:hover,
+.toolbar button:focus-visible,
+.toolbar .menu-trigger:focus-visible {
+  background: var(--accent-soft);
+  border-color: rgba(37, 99, 235, 0.26);
+  outline: none;
+}
+
+.menu {
+  position: relative;
+}
+
+.menu[aria-expanded="true"] .menu-content {
+  display: block;
+}
+
+.menu-content {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  display: none;
+  min-width: 200px;
+  background: var(--bg-toolbar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  z-index: 20;
+}
+
+.menu-content button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 8px 12px;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.menu-content button:hover,
+.menu-content button:focus-visible {
+  background: var(--accent-soft);
+  outline: none;
+}
+
+nav {
+  grid-area: tools;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 6px;
+  gap: 6px;
+  background: var(--bg-toolbar);
+  border-right: 1px solid var(--border);
+  box-shadow: 1px 0 3px rgba(15, 23, 42, 0.04);
+  z-index: 5;
+}
+
+nav button {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--text);
+}
+
+nav button.active,
+nav button:hover,
+nav button:focus-visible {
+  background: var(--accent-soft);
+  border-color: rgba(37, 99, 235, 0.26);
+  outline: none;
+}
+
+main {
+  grid-area: canvas;
+  position: relative;
+  overflow: hidden;
+}
+
+#canvas-container {
+  position: absolute;
+  inset: 0;
+}
+
+#main-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #ffffff;
+  cursor: crosshair;
+}
+
+.ruler {
+  position: absolute;
+  background: #edf0f5;
+  pointer-events: none;
+  box-shadow: inset 0 -1px 0 rgba(15, 23, 42, 0.08);
+}
+
+#ruler-horizontal {
+  top: 0;
+  left: 24px;
+  right: 0;
+  height: 24px;
+}
+
+#ruler-vertical {
+  top: 24px;
+  bottom: 0;
+  left: 0;
+  width: 24px;
+  box-shadow: inset -1px 0 0 rgba(15, 23, 42, 0.08);
+}
+
+#ruler-corner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 24px;
+  height: 24px;
+  background: #e2e8f0;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+aside {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-toolbar);
+  border-left: 1px solid var(--border);
+  box-shadow: -1px 0 3px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
+}
+
+.tabs {
+  display: flex;
+}
+
+.tabs button {
+  flex: 1;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.tabs button.active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+}
+
+.panel {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  display: none;
+}
+
+.panel.active {
+  display: block;
+}
+
+.layer-list,
+.annotation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.layer-item,
+.annotation-item {
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.layer-row,
+.annotation-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.layer-item.selected > .layer-row,
+.annotation-item.selected > .annotation-row {
+  background: var(--layer-selected);
+  border-color: rgba(37, 99, 235, 0.3);
+}
+
+.layer-item button,
+.annotation-item button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.layer-children {
+  list-style: none;
+  margin: 0 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.layer-meta {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.annotation-row {
+  cursor: pointer;
+}
+
+.annotation-item.hidden .annotation-row {
+  opacity: 0.6;
+}
+
+.layer-item.hidden > .layer-row {
+  opacity: 0.6;
+}
+
+.layer-item.locked > .layer-row {
+  font-style: italic;
+}
+
+.annotation-measurement {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.annotation-coords {
+  display: block;
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+#properties-panel label,
+#properties-panel input,
+#properties-panel select {
+  display: block;
+  width: 100%;
+}
+
+#properties-panel label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+#properties-panel input,
+#properties-panel select {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font: inherit;
+}
+
+footer {
+  grid-area: footer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-toolbar);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  gap: 12px;
+}
+
+footer .status-group {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.switch input {
+  margin: 0;
+}
+
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+}
+
+.toast {
+  background: var(--toast);
+  color: white;
+  padding: 10px 16px;
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+
+canvas {
+  touch-action: none;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+@media (max-width: 1100px) {
+  body {
+    grid-template-columns: 56px 1fr 280px;
+  }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Image Annotator</h1>
+  <div class="toolbar" id="file-toolbar">
+    <div class="menu" id="file-menu" aria-haspopup="true" aria-expanded="false">
+      <button class="menu-trigger" aria-controls="file-menu-content">File ▾</button>
+      <div class="menu-content" id="file-menu-content" role="menu">
+        <button data-action="open-image">Open Image…</button>
+        <button data-action="save-project">Save Project JSON…</button>
+        <button data-action="load-project">Load Project JSON…</button>
+        <button data-action="export-png">Export PNG…</button>
+        <button data-action="reset">Reset Canvas</button>
+      </div>
+    </div>
+    <div class="menu" id="view-menu" aria-haspopup="true" aria-expanded="false">
+      <button class="menu-trigger" aria-controls="view-menu-content">View ▾</button>
+      <div class="menu-content" id="view-menu-content" role="menu">
+        <button data-view="fit">Fit Image</button>
+        <button data-view="fill">Fill</button>
+        <button data-view="100">100%</button>
+        <button data-view="actual">Actual Pixels</button>
+      </div>
+    </div>
+    <div class="menu" id="settings-menu" aria-haspopup="true" aria-expanded="false">
+      <button class="menu-trigger" aria-controls="settings-menu-content">Settings ▾</button>
+      <div class="menu-content" id="settings-menu-content" role="menu">
+        <button data-action="set-vanishing" data-axis="left">Set Left Vanishing Point…</button>
+        <button data-action="set-vanishing" data-axis="right">Set Right Vanishing Point…</button>
+        <button data-action="set-vanishing" data-axis="vertical">Set Vertical Vanishing Point…</button>
+      </div>
+    </div>
+    <input type="file" id="hidden-image-input" accept="image/*" class="hidden">
+    <input type="file" id="hidden-project-input" accept="application/json" class="hidden">
+  </div>
+  <div class="toolbar" id="undo-toolbar">
+    <button id="undo-btn" disabled>Undo</button>
+    <button id="redo-btn" disabled>Redo</button>
+  </div>
+</header>
+
+<nav id="tool-palette" aria-label="Tools">
+  <button data-tool="select" class="active" title="Select (1)">⬚</button>
+  <button data-tool="pan" title="Pan (2)">✥</button>
+  <button data-tool="point" title="Point (3)">•</button>
+  <button data-tool="line" title="Line (4)">／</button>
+  <button data-tool="polyline" title="Polyline (5)">〰</button>
+  <button data-tool="rect" title="Rectangle (6)">▭</button>
+  <button data-tool="ellipse" title="Ellipse (7)">◯</button>
+  <button data-tool="polygon" title="Polygon (8)">⬠</button>
+  <button data-tool="triangle" title="Triangle">△</button>
+  <button data-tool="angle" title="Angle (9)">∠</button>
+  <button data-tool="text" title="Text (0)">T</button>
+  <button data-tool="calibrate" title="Calibrate (C)">⚖︎</button>
+  <button data-action="extend-vp" title="Extend Lines to Vanishing Points">⇱</button>
+</nav>
+
+<main>
+  <div id="canvas-container">
+    <canvas id="main-canvas" width="1280" height="720" role="img" aria-label="Annotation canvas"></canvas>
+    <canvas id="ruler-horizontal" class="ruler" aria-hidden="true"></canvas>
+    <canvas id="ruler-vertical" class="ruler" aria-hidden="true"></canvas>
+    <div id="ruler-corner" aria-hidden="true">px</div>
+  </div>
+</main>
+
+<aside>
+  <div class="tabs" role="tablist">
+    <button class="active" role="tab" aria-selected="true" data-tab="layers">Layers</button>
+    <button role="tab" aria-selected="false" data-tab="properties">Properties</button>
+    <button role="tab" aria-selected="false" data-tab="annotations">Annotations</button>
+  </div>
+  <section id="layers-panel" class="panel active" role="tabpanel" aria-label="Layers">
+    <ul class="layer-list" id="layer-list"></ul>
+  </section>
+  <section id="properties-panel" class="panel" role="tabpanel" aria-label="Properties">
+    <div id="properties-content" class="properties-empty">Select an annotation to edit its properties.</div>
+  </section>
+  <section id="annotations-panel" class="panel" role="tabpanel" aria-label="Annotations">
+    <ul class="annotation-list" id="annotation-list"></ul>
+  </section>
+</aside>
+
+<footer>
+  <div class="status-group">
+    <span id="status-coords">x: –, y: –</span>
+    <span id="status-zoom">Zoom: 100%</span>
+    <span id="status-measure">Measure: –</span>
+  </div>
+  <label class="switch"><input type="checkbox" id="snap-toggle" checked> Snap to points</label>
+</footer>
+
+<div class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ==========================================
+     Constants
+     ========================================== */
+  const SCHEMA_VERSION = 1;
+  const AUTOSAVE_KEY = 'image-annotator-autosave-v1';
+  const TOOL_ORDER = ['select', 'pan', 'point', 'line', 'polyline', 'rect', 'ellipse', 'polygon', 'angle', 'text', 'triangle', 'calibrate'];
+  const PATH_TOOLS = new Set(['polyline', 'polygon']);
+  const RULER_SIZE = 24;
+  const DEFAULT_PX_PER_INCH = 96;
+  const UNIT_ALIASES = {
+    mm: 'mm',
+    millimeter: 'mm',
+    millimeters: 'mm',
+    centimetre: 'cm',
+    centimetres: 'cm',
+    centimeter: 'cm',
+    centimeters: 'cm',
+    cm: 'cm',
+    m: 'm',
+    meter: 'm',
+    meters: 'm',
+    metre: 'm',
+    metres: 'm',
+    km: 'km',
+    kilometer: 'km',
+    kilometers: 'km',
+    inch: 'in',
+    inches: 'in',
+    in: 'in',
+    ft: 'ft',
+    foot: 'ft',
+    feet: 'ft',
+    yard: 'yd',
+    yards: 'yd',
+    yd: 'yd',
+    mile: 'mi',
+    miles: 'mi',
+    mi: 'mi'
+  };
+  const UNIT_TO_METERS = {
+    mm: 0.001,
+    cm: 0.01,
+    m: 1,
+    km: 1000,
+    in: 0.0254,
+    ft: 0.3048,
+    yd: 0.9144,
+    mi: 1609.34
+  };
+  const TRIANGLE_POINT_LABELS = ['A', 'B', 'C'];
+  const TRIANGLE_SIDE_LABELS = ['AB', 'BC', 'CA'];
+  const SNAP_DISTANCE = 10; // screen px
+  const MIN_ZOOM = 0.01;
+  const MAX_ZOOM = 16;
+  const VANISH_COLORS = {
+    left: '#FDD835',
+    right: '#E53935',
+    vertical: '#1E88E5'
+  };
+
+  const TOOL_DEFAULTS = {
+    stroke: '#2563eb',
+    fill: 'rgba(37,99,235,0.12)',
+    textColor: '#1f2933',
+    textSize: 16,
+    opacity: 1,
+    strokeWidth: 2
+  };
+
+  /* ==========================================
+     State
+     ========================================== */
+  const appState = {
+    image: null,
+    viewport: {
+      zoom: 1,
+      panX: 0,
+      panY: 0,
+      dpr: window.devicePixelRatio || 1
+    },
+    settings: {
+      snapEnabled: true
+    },
+    layers: [
+      { id: 'base', name: 'Annotations', visible: true, locked: false, children: [] }
+    ],
+    annotations: [],
+    selection: [],
+    draft: null,
+    history: {
+      stack: [],
+      index: -1
+    },
+    dirty: false,
+    calibration: null,
+    vanishingPoints: defaultVanishingPoints(),
+    pointerMode: 'select',
+    pointerId: null,
+    dragStart: null,
+    lastPointer: null,
+    modifiers: { shift: false, alt: false, ctrl: false }
+  };
+
+  let autosaveTimer = null;
+  let activeHandle = null;
+  
+  /* ==========================================
+     Utilities
+     ========================================== */
+
+  function defaultVanishingPoints() {
+    return {
+      left: { x: -500, y: 0 },
+      right: { x: 500, y: 0 },
+      vertical: { x: 0, y: -500 }
+    };
+  }
+
+  function normalizeUnit(unit) {
+    if (!unit) return null;
+    const trimmed = unit.toString().trim().toLowerCase();
+    if (!trimmed) return null;
+    if (UNIT_ALIASES[trimmed]) return UNIT_ALIASES[trimmed];
+    const compact = trimmed.replace(/\s+/g, '');
+    return UNIT_ALIASES[compact] || null;
+  }
+
+  function convertDistance(value, fromUnit, toUnit) {
+    const from = normalizeUnit(fromUnit);
+    const to = normalizeUnit(toUnit);
+    if (!from || !to) return null;
+    const fromMeters = UNIT_TO_METERS[from];
+    const toMeters = UNIT_TO_METERS[to];
+    if (!fromMeters || !toMeters) return null;
+    return value * (fromMeters / toMeters);
+  }
+
+  function getUnitsPerPixel(targetUnit) {
+    const target = normalizeUnit(targetUnit);
+    if (!target) return null;
+    if (appState.calibration) {
+      const baseUnit = normalizeUnit(appState.calibration.unit);
+      if (baseUnit) {
+        const conversion = convertDistance(1, baseUnit, target);
+        if (conversion != null) {
+          return appState.calibration.ratio * conversion;
+        }
+      }
+    }
+    const metersPerPixel = UNIT_TO_METERS.in / DEFAULT_PX_PER_INCH;
+    const targetMeters = UNIT_TO_METERS[target];
+    if (!targetMeters) return null;
+    return metersPerPixel / targetMeters;
+  }
+
+  function getPixelsPerUnit(targetUnit) {
+    const unitsPerPixel = getUnitsPerPixel(targetUnit);
+    if (!unitsPerPixel || unitsPerPixel <= 0) return null;
+    return 1 / unitsPerPixel;
+  }
+
+  const $ = sel => document.querySelector(sel);
+  const $$ = sel => Array.from(document.querySelectorAll(sel));
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function createId(prefix) {
+    return `${prefix}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function deepClone(data) {
+    return structuredClone ? structuredClone(data) : JSON.parse(JSON.stringify(data));
+  }
+
+  function applyModifier(event, isDown) {
+    const key = event.key;
+    if (key === 'Shift') {
+      appState.modifiers.shift = isDown;
+    } else if (key === 'Alt') {
+      appState.modifiers.alt = isDown;
+    } else if (key === 'Control' || key === 'Meta') {
+      appState.modifiers.ctrl = isDown;
+    }
+  }
+
+  function resetModifiers() {
+    appState.modifiers.shift = false;
+    appState.modifiers.alt = false;
+    appState.modifiers.ctrl = false;
+  }
+
+  function isShiftPressed(event) {
+    return !!(event?.shiftKey || appState.modifiers.shift);
+  }
+
+  function toCanvasCoords(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * appState.viewport.dpr;
+    const y = (clientY - rect.top) * appState.viewport.dpr;
+    const invZoom = 1 / appState.viewport.zoom;
+    return {
+      x: (x - appState.viewport.panX) * invZoom,
+      y: (y - appState.viewport.panY) * invZoom
+    };
+  }
+
+  function scheduleAutosave() {
+    appState.dirty = true;
+    if (autosaveTimer) return;
+    autosaveTimer = setTimeout(() => {
+      autosaveTimer = null;
+      try {
+        const payload = serializeState();
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
+      } catch (err) {
+        console.error('Autosave failed', err);
+      }
+    }, 1500);
+  }
+
+  function toast(message, timeout = 2800) {
+    const container = $('.toast-container');
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = message;
+    container.appendChild(el);
+    setTimeout(() => {
+      el.classList.add('hidden');
+      setTimeout(() => el.remove(), 300);
+    }, timeout);
+  }
+
+  function serializeState() {
+    const image = appState.image
+      ? { src: appState.image.src, width: appState.image.width, height: appState.image.height }
+      : null;
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      image,
+      viewport: {
+        zoom: appState.viewport.zoom,
+        panX: appState.viewport.panX,
+        panY: appState.viewport.panY
+      },
+      settings: deepClone(appState.settings),
+      layers: deepClone(appState.layers),
+      annotations: deepClone(appState.annotations),
+      calibration: appState.calibration ? { ...appState.calibration } : null,
+      vanishingPoints: deepClone(appState.vanishingPoints)
+    };
+  }
+
+  function pushHistory(label) {
+    const snapshot = serializeState();
+    appState.history.stack = appState.history.stack.slice(0, appState.history.index + 1);
+    appState.history.stack.push({ label, snapshot });
+    const maxEntries = 100;
+    if (appState.history.stack.length > maxEntries) {
+      appState.history.stack.shift();
+    }
+    appState.history.index = appState.history.stack.length - 1;
+    updateUndoRedoButtons();
+    scheduleAutosave();
+  }
+
+  function restoreSnapshot(snapshot) {
+    appState.image = snapshot.image ? createImageFromSnapshot(snapshot.image) : null;
+    appState.viewport.zoom = snapshot.viewport.zoom;
+    appState.viewport.panX = snapshot.viewport.panX;
+    appState.viewport.panY = snapshot.viewport.panY;
+    appState.settings = deepClone(snapshot.settings || appState.settings);
+    appState.layers = deepClone(snapshot.layers);
+    appState.annotations = deepClone(snapshot.annotations || []).map(annotation => ({
+      ...annotation,
+      hidden: !!annotation.hidden,
+      locked: !!annotation.locked
+    }));
+    appState.calibration = snapshot.calibration ? { ...snapshot.calibration } : null;
+    appState.vanishingPoints = deepClone(snapshot.vanishingPoints || defaultVanishingPoints());
+    appState.selection = [];
+    appState.draft = null;
+    resetModifiers();
+    activeHandle = null;
+    scheduleRedraw();
+    refreshUI();
+    updateMeasurementStatus(null);
+  }
+
+  function undo() {
+    if (appState.history.index <= 0) return;
+    appState.history.index -= 1;
+    const entry = appState.history.stack[appState.history.index];
+    restoreSnapshot(entry.snapshot);
+    updateUndoRedoButtons();
+  }
+
+  function redo() {
+    if (appState.history.index >= appState.history.stack.length - 1) return;
+    appState.history.index += 1;
+    const entry = appState.history.stack[appState.history.index];
+    restoreSnapshot(entry.snapshot);
+    updateUndoRedoButtons();
+  }
+
+  function updateUndoRedoButtons() {
+    $('#undo-btn').disabled = appState.history.index <= 0;
+    $('#redo-btn').disabled = appState.history.index >= appState.history.stack.length - 1;
+  }
+
+  function createImageFromSnapshot(snapshot) {
+    const img = new Image();
+    img.src = snapshot.src;
+    img.width = snapshot.width;
+    img.height = snapshot.height;
+    return img;
+  }
+
+  /* ==========================================
+     Geometry & Math
+     ========================================== */
+
+  function lengthBetween(a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function polygonArea(points) {
+    if (points.length < 3) return 0;
+    let area = 0;
+    for (let i = 0; i < points.length; i++) {
+      const p1 = points[i];
+      const p2 = points[(i + 1) % points.length];
+      area += p1.x * p2.y - p2.x * p1.y;
+    }
+    return Math.abs(area / 2);
+  }
+
+  function polylineLength(points) {
+    if (!points || points.length < 2) return 0;
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += lengthBetween(points[i - 1], points[i]);
+    }
+    return total;
+  }
+
+  function angleBetween(a, b, c) {
+    const ab = { x: a.x - b.x, y: a.y - b.y };
+    const cb = { x: c.x - b.x, y: c.y - b.y };
+    const dot = ab.x * cb.x + ab.y * cb.y;
+    const len = Math.sqrt((ab.x * ab.x + ab.y * ab.y) * (cb.x * cb.x + cb.y * cb.y));
+    if (len === 0) return 0;
+    const cos = clamp(dot / len, -1, 1);
+    return (Math.acos(cos) * 180) / Math.PI;
+  }
+
+  function midpoint(a, b) {
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  function normalizeVector(vector) {
+    const length = Math.hypot(vector.x, vector.y);
+    if (!length) return { x: 0, y: 0 };
+    return { x: vector.x / length, y: vector.y / length };
+  }
+
+  function inwardNormal(a, b, centroidPoint) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const length = Math.hypot(dx, dy);
+    if (!length) return { x: 0, y: -1 };
+    let normal = { x: -dy / length, y: dx / length };
+    const mid = midpoint(a, b);
+    const toCentroid = normalizeVector({ x: centroidPoint.x - mid.x, y: centroidPoint.y - mid.y });
+    if (normal.x * toCentroid.x + normal.y * toCentroid.y < 0) {
+      normal = { x: -normal.x, y: -normal.y };
+    }
+    return normal;
+  }
+
+  function angleBisectorDirection(vertex, p1, p2, fallback) {
+    const v1 = normalizeVector({ x: p1.x - vertex.x, y: p1.y - vertex.y });
+    const v2 = normalizeVector({ x: p2.x - vertex.x, y: p2.y - vertex.y });
+    let dir = { x: v1.x + v2.x, y: v1.y + v2.y };
+    const len = Math.hypot(dir.x, dir.y);
+    if (len < 1e-6) {
+      if (fallback) {
+        dir = normalizeVector({ x: fallback.x - vertex.x, y: fallback.y - vertex.y });
+      } else {
+        dir = { x: 0, y: -1 };
+      }
+    } else {
+      dir.x /= len;
+      dir.y /= len;
+    }
+    return dir;
+  }
+
+  function triangleMetrics(points) {
+    if (!points || points.length < 3) return null;
+    const [a, b, c] = points;
+    const centroidPoint = centroid(points);
+    return {
+      sides: [
+        { length: lengthBetween(a, b), points: [a, b] },
+        { length: lengthBetween(b, c), points: [b, c] },
+        { length: lengthBetween(c, a), points: [c, a] }
+      ],
+      angles: [
+        { value: angleBetween(b, a, c), vertex: a, refs: [b, c] },
+        { value: angleBetween(c, b, a), vertex: b, refs: [c, a] },
+        { value: angleBetween(a, c, b), vertex: c, refs: [a, b] }
+      ],
+      area: polygonArea(points),
+      centroid: centroidPoint
+    };
+  }
+
+  function triangleSummary(points) {
+    const metrics = triangleMetrics(points);
+    if (!metrics) return '';
+    const sideText = metrics.sides
+      .map((side, index) => `${TRIANGLE_SIDE_LABELS[index]} ${formatMeasurement(side.length, 'length')}`)
+      .join(', ');
+    const angleText = metrics.angles
+      .map((angle, index) => `${TRIANGLE_POINT_LABELS[index]} ${formatMeasurement(angle.value, 'angle')}`)
+      .join(', ');
+    return `Sides ${sideText} | Angles ${angleText}`;
+  }
+
+  function rectangleSummary(geometry) {
+    if (!geometry) return '';
+    const { width, height } = geometry;
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return '';
+    const rectWidth = Math.abs(width);
+    const rectHeight = Math.abs(height);
+    if (rectWidth === 0 && rectHeight === 0) return '';
+    const widthText = formatMeasurement(rectWidth, 'length');
+    const heightText = formatMeasurement(rectHeight, 'length');
+    return `W ${widthText} × H ${heightText}`;
+  }
+
+  const ANGLE_SNAP_RADIANS = (15 * Math.PI) / 180;
+
+  function normalizeAngle(angle) {
+    const tau = Math.PI * 2;
+    let result = angle % tau;
+    if (result <= -Math.PI) result += tau;
+    if (result > Math.PI) result -= tau;
+    return result;
+  }
+
+  function constrainPointToAngle(anchor, target, step = ANGLE_SNAP_RADIANS) {
+    const dx = target.x - anchor.x;
+    const dy = target.y - anchor.y;
+    const distance = Math.hypot(dx, dy);
+    if (!distance) return { ...target };
+    const angle = Math.atan2(dy, dx);
+    const snapped = Math.round(angle / step) * step;
+    return {
+      x: anchor.x + Math.cos(snapped) * distance,
+      y: anchor.y + Math.sin(snapped) * distance
+    };
+  }
+
+  function constrainAngleSpan(vertex, legPoint, target, step = ANGLE_SNAP_RADIANS) {
+    const distance = Math.hypot(target.x - vertex.x, target.y - vertex.y);
+    if (!distance) return { ...target };
+    const baseAngle = Math.atan2(legPoint.y - vertex.y, legPoint.x - vertex.x);
+    const targetAngle = Math.atan2(target.y - vertex.y, target.x - vertex.x);
+    const delta = normalizeAngle(targetAngle - baseAngle);
+    const snappedDelta = Math.round(delta / step) * step;
+    const snappedAngle = baseAngle + snappedDelta;
+    return {
+      x: vertex.x + Math.cos(snappedAngle) * distance,
+      y: vertex.y + Math.sin(snappedAngle) * distance
+    };
+  }
+
+  function constrainCornerToSquare(start, target) {
+    const dx = target.x - start.x;
+    const dy = target.y - start.y;
+    const span = Math.max(Math.abs(dx), Math.abs(dy));
+    if (!span) return { ...target };
+    const sx = dx >= 0 ? 1 : -1;
+    const sy = dy >= 0 ? 1 : -1;
+    return {
+      x: start.x + span * sx,
+      y: start.y + span * sy
+    };
+  }
+
+  function formatNumber(value, decimals = 2) {
+    return parseFloat(value.toFixed(decimals)).toString();
+  }
+
+  function formatMeasurement(value, kind = 'length') {
+    if (value == null) return '–';
+    if (kind === 'angle') {
+      return `${formatNumber(value, 1)}°`;
+    }
+    const calibration = appState.calibration;
+    const decimals = kind === 'area' ? 2 : 2;
+    if (!calibration) {
+      const suffix = kind === 'area' ? 'px²' : 'px';
+      return `${formatNumber(value, decimals)} ${suffix}`;
+    }
+    if (kind === 'area') {
+      const real = value * calibration.ratio * calibration.ratio;
+      return `${formatNumber(real, decimals)} ${calibration.unit}²`;
+    }
+    const real = value * calibration.ratio;
+    return `${formatNumber(real, decimals)} ${calibration.unit}`;
+  }
+
+  const TYPE_LABELS = {
+    point: 'Point',
+    line: 'Line',
+    polyline: 'Path',
+    rect: 'Rectangle',
+    ellipse: 'Ellipse',
+    polygon: 'Polygon',
+    triangle: 'Triangle',
+    angle: 'Angle',
+    text: 'Text'
+  };
+
+  function annotationDisplayName(annotation) {
+    if (annotation.label && annotation.label.trim()) {
+      return annotation.label.trim();
+    }
+    const typeLabel = TYPE_LABELS[annotation.type] || annotation.type;
+    return `${typeLabel} (${annotation.id.slice(-4)})`;
+  }
+
+  function measurementLabel(kind) {
+    return kind === 'area' ? 'Area' : kind === 'angle' ? 'Angle' : 'Length';
+  }
+
+  function measurementForAnnotation(annotation) {
+    switch (annotation.type) {
+      case 'line':
+        return {
+          kind: 'length',
+          value: lengthBetween(annotation.geometry.start, annotation.geometry.end)
+        };
+      case 'polyline': {
+        const pts = annotation.geometry.points;
+        if (!pts || pts.length < 2) return null;
+        let total = 0;
+        for (let i = 1; i < pts.length; i++) {
+          total += lengthBetween(pts[i - 1], pts[i]);
+        }
+        return { kind: 'length', value: total };
+      }
+      case 'rect':
+        return null;
+      case 'ellipse': {
+        const { width, height } = annotation.geometry;
+        if (width == null || height == null) return null;
+        return {
+          kind: 'area',
+          value: Math.PI * Math.abs(width / 2) * Math.abs(height / 2)
+        };
+      }
+      case 'polygon': {
+        const pts = annotation.geometry.points;
+        if (!pts || pts.length < 3) return null;
+        return { kind: 'area', value: polygonArea(pts) };
+      }
+      case 'triangle': {
+        const pts = annotation.geometry.points;
+        if (!pts || pts.length < 3) return null;
+        return { kind: 'area', value: polygonArea(pts) };
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        if (!a || !b || !c) return null;
+        return { kind: 'angle', value: angleBetween(a, b, c) };
+      }
+      default:
+        return null;
+    }
+  }
+
+  function effectivePathPoints(points) {
+    if (points.length < 2) return points;
+    const last = points[points.length - 1];
+    const prev = points[points.length - 2];
+    if (last.x === prev.x && last.y === prev.y) {
+      return points.slice(0, -1);
+    }
+    return points;
+  }
+
+  function collectAnnotationPoints(annotation, isDraft = false) {
+    if (!annotation || !annotation.geometry) return [];
+    const geom = annotation.geometry;
+    const type = annotation.type;
+    switch (type) {
+      case 'point':
+        return geom.x != null && geom.y != null ? [geom] : [];
+      case 'line':
+      case 'calibrate':
+        return [geom.start, geom.end].filter(Boolean);
+      case 'polyline':
+      case 'polygon':
+      case 'triangle': {
+        const pts = geom.points || [];
+        const list = isDraft ? effectivePathPoints(pts) : pts;
+        return list.filter(Boolean);
+      }
+      case 'rect': {
+        const { x, y, width, height } = geom;
+        if ([x, y, width, height].some(v => v == null)) return [];
+        const x2 = x + width;
+        const y2 = y + height;
+        return [
+          { x, y },
+          { x: x2, y },
+          { x: x2, y: y2 },
+          { x, y: y2 }
+        ];
+      }
+      case 'ellipse': {
+        const { x, y, width, height } = geom;
+        if ([x, y, width, height].some(v => v == null)) return [];
+        const x2 = x + width;
+        const y2 = y + height;
+        return [
+          { x, y },
+          { x: x2, y },
+          { x: x2, y: y2 },
+          { x, y: y2 }
+        ];
+      }
+      case 'angle': {
+        const points = [];
+        if (geom.a) points.push(geom.a);
+        if (geom.b) points.push(geom.b);
+        if (geom.c && (!isDraft || geom.stage >= 2)) points.push(geom.c);
+        return points;
+      }
+      case 'text':
+        return geom.position ? [geom.position] : [];
+      default:
+        return [];
+    }
+  }
+
+  /* ==========================================
+     Rendering
+     ========================================== */
+
+  const canvas = $('#main-canvas');
+  const canvasContainer = $('#canvas-container');
+  const horizontalRuler = $('#ruler-horizontal');
+  const verticalRuler = $('#ruler-vertical');
+  const rulerCorner = $('#ruler-corner');
+  const rulerCtxH = horizontalRuler.getContext('2d');
+  const rulerCtxV = verticalRuler.getContext('2d');
+  const ctx = canvas.getContext('2d');
+  let needsRedraw = false;
+
+  function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    appState.viewport.dpr = dpr;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    resizeRulers();
+    drawRulers();
+    scheduleRedraw();
+  }
+
+  function scheduleRedraw() {
+    if (!needsRedraw) {
+      needsRedraw = true;
+      requestAnimationFrame(redraw);
+    }
+  }
+
+  function resizeRulers() {
+    if (!horizontalRuler || !verticalRuler) return;
+    const rect = canvasContainer.getBoundingClientRect();
+    const dpr = appState.viewport.dpr;
+    const width = Math.max(rect.width - RULER_SIZE, 0);
+    const height = Math.max(rect.height - RULER_SIZE, 0);
+    horizontalRuler.width = Math.max(Math.round(width * dpr), 1);
+    horizontalRuler.height = Math.max(Math.round(RULER_SIZE * dpr), 1);
+    verticalRuler.width = Math.max(Math.round(RULER_SIZE * dpr), 1);
+    verticalRuler.height = Math.max(Math.round(height * dpr), 1);
+  }
+
+  function drawRulers() {
+    if (!horizontalRuler || !verticalRuler) return;
+    drawHorizontalRuler();
+    drawVerticalRuler();
+    if (rulerCorner) {
+      rulerCorner.textContent = 'cm | in';
+    }
+  }
+
+  function drawHorizontalRuler() {
+    const width = horizontalRuler.width;
+    const height = horizontalRuler.height;
+    if (!width || !height) return;
+    const dpr = appState.viewport.dpr;
+    const cssWidth = width / dpr;
+    const cssHeight = height / dpr;
+    const ctx = rulerCtxH;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#edf0f5';
+    ctx.fillRect(0, 0, cssWidth, cssHeight);
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.8)';
+    ctx.beginPath();
+    ctx.moveTo(0, cssHeight - 0.5);
+    ctx.lineTo(cssWidth, cssHeight - 0.5);
+    ctx.moveTo(0, cssHeight / 2);
+    ctx.lineTo(cssWidth, cssHeight / 2);
+    ctx.stroke();
+
+    const segmentHeight = cssHeight / 2;
+    drawHorizontalScale('cm', ctx, cssWidth, segmentHeight, 0, true);
+    drawHorizontalScale('in', ctx, cssWidth, segmentHeight, segmentHeight, false);
+  }
+
+  function drawVerticalRuler() {
+    const width = verticalRuler.width;
+    const height = verticalRuler.height;
+    if (!width || !height) return;
+    const dpr = appState.viewport.dpr;
+    const cssWidth = width / dpr;
+    const cssHeight = height / dpr;
+    const ctx = rulerCtxV;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#edf0f5';
+    ctx.fillRect(0, 0, cssWidth, cssHeight);
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.8)';
+    ctx.beginPath();
+    ctx.moveTo(cssWidth - 0.5, 0);
+    ctx.lineTo(cssWidth - 0.5, cssHeight);
+    ctx.moveTo(cssWidth / 2, 0);
+    ctx.lineTo(cssWidth / 2, cssHeight);
+    ctx.stroke();
+
+    const segmentWidth = cssWidth / 2;
+    drawVerticalScale('in', ctx, cssHeight, segmentWidth, 0, false);
+    drawVerticalScale('cm', ctx, cssHeight, segmentWidth, segmentWidth, true);
+  }
+
+  function drawHorizontalScale(unit, ctx, cssWidth, segmentHeight, offsetY, alignTop) {
+    const pixelsPerUnit = getPixelsPerUnit(unit);
+    if (!pixelsPerUnit) return;
+    const pxPerUnitScreen = pixelsPerUnit * appState.viewport.zoom / appState.viewport.dpr;
+    const desiredPx = 80;
+    const desiredUnits = desiredPx / pxPerUnitScreen;
+    const stepUnits = chooseRulerStep(desiredUnits);
+    if (!Number.isFinite(stepUnits) || stepUnits <= 0) return;
+
+    const stepWorld = stepUnits * pixelsPerUnit;
+    const startWorld = screenToWorldX(RULER_SIZE);
+    const endWorld = screenToWorldX(RULER_SIZE + cssWidth);
+    const startUnits = startWorld / pixelsPerUnit;
+    const endUnits = endWorld / pixelsPerUnit;
+    const firstTick = Math.floor(startUnits / stepUnits) * stepUnits;
+    const stepCss = stepWorld * appState.viewport.zoom / appState.viewport.dpr;
+    const majorEvery = stepUnits >= 10 ? 1 : 5;
+    const baseline = alignTop ? segmentHeight : 0;
+    const label = unit === 'cm' ? 'cm' : unit === 'in' ? 'in' : unit;
+
+    ctx.save();
+    ctx.translate(0, offsetY);
+    ctx.strokeStyle = '#94a3b8';
+    ctx.fillStyle = '#475569';
+    ctx.font = '10px/1 sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = alignTop ? 'top' : 'bottom';
+
+    for (let value = firstTick; value <= endUnits + stepUnits; value += stepUnits) {
+      const world = value * pixelsPerUnit;
+      const cssPos = worldToScreenX(world) - RULER_SIZE;
+      if (cssPos < -stepCss) continue;
+      if (cssPos > cssWidth + stepCss) break;
+      const major = isMajorTick(value, stepUnits, majorEvery);
+      const delta = major ? Math.max(segmentHeight - 2, segmentHeight * 0.75) : segmentHeight * 0.55;
+      const start = baseline;
+      const end = alignTop ? Math.max(baseline - delta, 0) : Math.min(baseline + delta, segmentHeight);
+      ctx.beginPath();
+      ctx.moveTo(cssPos + 0.5, start);
+      ctx.lineTo(cssPos + 0.5, end);
+      ctx.stroke();
+      if (major) {
+        const decimals = stepUnits < 1 ? 2 : stepUnits < 10 ? 1 : 0;
+        ctx.fillText(formatNumber(value, decimals), cssPos, alignTop ? 2 : segmentHeight - 2);
+      }
+    }
+
+    ctx.fillStyle = '#1f2933';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = alignTop ? 'top' : 'bottom';
+    ctx.fillText(label, 4, alignTop ? 2 : segmentHeight - 2);
+    ctx.restore();
+  }
+
+  function drawVerticalScale(unit, ctx, cssHeight, segmentWidth, offsetX, alignRight) {
+    const pixelsPerUnit = getPixelsPerUnit(unit);
+    if (!pixelsPerUnit) return;
+    const pxPerUnitScreen = pixelsPerUnit * appState.viewport.zoom / appState.viewport.dpr;
+    const desiredPx = 80;
+    const desiredUnits = desiredPx / pxPerUnitScreen;
+    const stepUnits = chooseRulerStep(desiredUnits);
+    if (!Number.isFinite(stepUnits) || stepUnits <= 0) return;
+
+    const stepWorld = stepUnits * pixelsPerUnit;
+    const startWorld = screenToWorldY(RULER_SIZE);
+    const endWorld = screenToWorldY(RULER_SIZE + cssHeight);
+    const startUnits = startWorld / pixelsPerUnit;
+    const endUnits = endWorld / pixelsPerUnit;
+    const firstTick = Math.floor(startUnits / stepUnits) * stepUnits;
+    const stepCss = stepWorld * appState.viewport.zoom / appState.viewport.dpr;
+    const majorEvery = stepUnits >= 10 ? 1 : 5;
+    const label = unit === 'cm' ? 'cm' : unit === 'in' ? 'in' : unit;
+
+    ctx.save();
+    ctx.translate(offsetX, 0);
+    ctx.strokeStyle = '#94a3b8';
+    ctx.fillStyle = '#475569';
+    ctx.font = '10px/1 sans-serif';
+
+    for (let value = firstTick; value <= endUnits + stepUnits; value += stepUnits) {
+      const world = value * pixelsPerUnit;
+      const cssPos = worldToScreenY(world) - RULER_SIZE;
+      if (cssPos < -stepCss) continue;
+      if (cssPos > cssHeight + stepCss) break;
+      const major = isMajorTick(value, stepUnits, majorEvery);
+      const delta = major ? Math.max(segmentWidth - 2, segmentWidth * 0.75) : segmentWidth * 0.55;
+      const start = alignRight ? segmentWidth : 0;
+      const end = alignRight ? Math.max(segmentWidth - delta, 0) : Math.min(delta, segmentWidth);
+      ctx.beginPath();
+      ctx.moveTo(start, cssPos + 0.5);
+      ctx.lineTo(end, cssPos + 0.5);
+      ctx.stroke();
+      if (major) {
+        const decimals = stepUnits < 1 ? 2 : stepUnits < 10 ? 1 : 0;
+        ctx.save();
+        const textX = alignRight ? segmentWidth - 2 : 2;
+        ctx.translate(textX, cssPos);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(formatNumber(value, decimals), 0, 2);
+        ctx.restore();
+      }
+    }
+
+    ctx.save();
+    const textOffset = alignRight
+      ? Math.max(segmentWidth - 8, 2)
+      : Math.min(8, Math.max(segmentWidth / 2, 2));
+    ctx.translate(textOffset, 12);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#1f2933';
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
+    ctx.restore();
+  }
+
+  function chooseRulerStep(desired) {
+    if (!Number.isFinite(desired) || desired <= 0) return 10;
+    const base = [1, 2, 5];
+    const power = Math.pow(10, Math.floor(Math.log10(desired)));
+    for (const factor of base) {
+      const candidate = factor * power;
+      if (desired <= candidate) {
+        return candidate;
+      }
+    }
+    return 10 * power;
+  }
+
+  function isMajorTick(value, step, every) {
+    const index = Math.round(value / step);
+    const mod = ((index % every) + every) % every;
+    return mod === 0;
+  }
+
+  function screenToWorldX(css) {
+    return ((css * appState.viewport.dpr) - appState.viewport.panX) / appState.viewport.zoom;
+  }
+
+  function screenToWorldY(css) {
+    return ((css * appState.viewport.dpr) - appState.viewport.panY) / appState.viewport.zoom;
+  }
+
+  function worldToScreenX(world) {
+    return (world * appState.viewport.zoom + appState.viewport.panX) / appState.viewport.dpr;
+  }
+
+  function worldToScreenY(world) {
+    return (world * appState.viewport.zoom + appState.viewport.panY) / appState.viewport.dpr;
+  }
+
+  function redraw() {
+    needsRedraw = false;
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(appState.viewport.dpr, 0, 0, appState.viewport.dpr, 0, 0);
+    ctx.translate(appState.viewport.panX, appState.viewport.panY);
+    ctx.scale(appState.viewport.zoom, appState.viewport.zoom);
+
+    drawImage();
+    drawVanishingPoints();
+    drawAnnotations();
+    drawDraft();
+    ctx.restore();
+    drawSelectionHandles();
+    drawRulers();
+  }
+
+  function drawImage() {
+    if (!appState.image) return;
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.drawImage(appState.image, 0, 0);
+    ctx.restore();
+  }
+
+  function drawVanishingPoints() {
+    ctx.save();
+    const zoom = appState.viewport.zoom;
+    const radius = 6 / zoom;
+    const cross = 12 / zoom;
+    for (const [axis, point] of Object.entries(appState.vanishingPoints)) {
+      if (!point) continue;
+      const color = VANISH_COLORS[axis] || '#111827';
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 2 / zoom;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(point.x - cross / 2, point.y);
+      ctx.lineTo(point.x + cross / 2, point.y);
+      ctx.moveTo(point.x, point.y - cross / 2);
+      ctx.lineTo(point.x, point.y + cross / 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawAnnotations() {
+    for (const annotation of appState.annotations) {
+      if (!isAnnotationVisible(annotation.id)) continue;
+      drawAnnotation(annotation);
+    }
+  }
+
+  function drawDraft() {
+    if (!appState.draft) return;
+    drawAnnotation(appState.draft, true);
+  }
+
+  function drawAnnotation(annotation, isDraft = false) {
+    const style = annotation.style;
+    const opacity = style.opacity ?? 1;
+    ctx.save();
+    ctx.globalAlpha = opacity;
+    ctx.lineWidth = (style.strokeWidth || TOOL_DEFAULTS.strokeWidth) / appState.viewport.zoom;
+    ctx.strokeStyle = style.stroke || TOOL_DEFAULTS.stroke;
+    ctx.fillStyle = style.fill || TOOL_DEFAULTS.fill;
+
+    switch (annotation.type) {
+      case 'point':
+        drawPoint(annotation.geometry);
+        break;
+      case 'line':
+        drawLine(annotation.geometry);
+        break;
+      case 'calibrate':
+        ctx.setLineDash([8 / appState.viewport.zoom, 6 / appState.viewport.zoom]);
+        drawLine(annotation.geometry);
+        break;
+      case 'polyline':
+        drawPolyline(annotation.geometry);
+        break;
+      case 'rect':
+        drawRect(annotation.geometry, true);
+        break;
+      case 'ellipse':
+        drawEllipse(annotation.geometry);
+        break;
+      case 'polygon':
+        drawPolygon(annotation.geometry);
+        break;
+      case 'triangle':
+        drawPolygon(annotation.geometry);
+        break;
+      case 'angle':
+        drawAngle(annotation.geometry);
+        break;
+      case 'text':
+        drawText(annotation);
+        break;
+    }
+
+    ctx.restore();
+
+    if (!isDraft) {
+      drawMeasurement(annotation);
+    }
+  }
+
+  function drawPoint({ x, y }) {
+    ctx.beginPath();
+    ctx.arc(x, y, 4 / appState.viewport.zoom, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawLine({ start, end }) {
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+  }
+
+  function drawPolyline({ points }) {
+    if (points.length < 2) return;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    ctx.stroke();
+  }
+
+  function drawRect({ x, y, width, height }, fill = false) {
+    if (fill) {
+      ctx.beginPath();
+      ctx.rect(x, y, width, height);
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.strokeRect(x, y, width, height);
+    }
+  }
+
+  function drawEllipse({ x, y, width, height }) {
+    ctx.beginPath();
+    ctx.ellipse(x + width / 2, y + height / 2, Math.abs(width) / 2, Math.abs(height) / 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawPolygon({ points }) {
+    if (points.length < 3) return;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  function drawAngle({ a, b, c }) {
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(c.x, c.y);
+    ctx.stroke();
+  }
+
+  function drawText(annotation) {
+    const { position, content } = annotation.geometry;
+    ctx.save();
+    ctx.font = `${annotation.style.textSize || TOOL_DEFAULTS.textSize}px/1.2 sans-serif`;
+    ctx.fillStyle = annotation.style.textColor || TOOL_DEFAULTS.textColor;
+    ctx.translate(position.x, position.y);
+    ctx.scale(1 / appState.viewport.zoom, 1 / appState.viewport.zoom);
+    ctx.fillText(content, 0, 0);
+    ctx.restore();
+  }
+
+  function drawMeasurement(annotation) {
+    ctx.save();
+    let text = '';
+    let position = null;
+
+    switch (annotation.type) {
+      case 'line': {
+        const len = lengthBetween(annotation.geometry.start, annotation.geometry.end);
+        text = formatMeasurement(len, 'length');
+        position = {
+          x: (annotation.geometry.start.x + annotation.geometry.end.x) / 2,
+          y: (annotation.geometry.start.y + annotation.geometry.end.y) / 2
+        };
+        break;
+      }
+      case 'polyline': {
+        const pts = annotation.geometry.points;
+        let total = 0;
+        for (let i = 1; i < pts.length; i++) {
+          total += lengthBetween(pts[i - 1], pts[i]);
+        }
+        text = formatMeasurement(total, 'length');
+        position = pts[Math.floor(pts.length / 2)] || pts[0];
+        break;
+      }
+      case 'rect': {
+        drawRectangleMeasurements(annotation.geometry);
+        ctx.restore();
+        return;
+      }
+      case 'ellipse': {
+        const { width, height, x, y } = annotation.geometry;
+        const area = Math.PI * Math.abs(width / 2) * Math.abs(height / 2);
+        text = formatMeasurement(area, 'area');
+        position = { x: x + width / 2, y: y + height / 2 };
+        break;
+      }
+      case 'polygon': {
+        const area = polygonArea(annotation.geometry.points);
+        text = formatMeasurement(area, 'area');
+        position = centroid(annotation.geometry.points);
+        break;
+      }
+      case 'triangle': {
+        drawTriangleMeasurements(annotation.geometry.points);
+        ctx.restore();
+        return;
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        const ang = angleBetween(a, b, c);
+        text = formatMeasurement(ang, 'angle');
+        position = { x: b.x, y: b.y };
+        break;
+      }
+      default:
+        ctx.restore();
+        return;
+    }
+
+    if (!position || !text) {
+      ctx.restore();
+      return;
+    }
+
+    drawLabel(position.x, position.y, text);
+    ctx.restore();
+  }
+
+  function drawRectangleMeasurements(geometry) {
+    if (!geometry) return;
+    const { x, y, width, height } = geometry;
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height)
+    ) {
+      return;
+    }
+    const x1 = Math.min(x, x + width);
+    const x2 = Math.max(x, x + width);
+    const y1 = Math.min(y, y + height);
+    const y2 = Math.max(y, y + height);
+    const rectWidth = x2 - x1;
+    const rectHeight = y2 - y1;
+
+    if (rectWidth > 0) {
+      const topMid = { x: (x1 + x2) / 2, y: y1 };
+      drawLabel(topMid.x, topMid.y, formatMeasurement(rectWidth, 'length'), {
+        offsetY: -12,
+        baseline: 'bottom'
+      });
+    }
+
+    if (rectHeight > 0) {
+      const rightMid = { x: x2, y: (y1 + y2) / 2 };
+      drawLabel(rightMid.x, rightMid.y, formatMeasurement(rectHeight, 'length'), {
+        offsetX: 12,
+        align: 'left'
+      });
+    }
+  }
+
+  function drawTriangleMeasurements(points) {
+    const metrics = triangleMetrics(points);
+    if (!metrics) return;
+    for (const side of metrics.sides) {
+      const mid = midpoint(side.points[0], side.points[1]);
+      const normal = inwardNormal(side.points[0], side.points[1], metrics.centroid);
+      drawLabel(mid.x, mid.y, formatMeasurement(side.length, 'length'), {
+        offsetX: normal.x * 14,
+        offsetY: normal.y * 14
+      });
+    }
+    for (const angle of metrics.angles) {
+      const direction = angleBisectorDirection(angle.vertex, angle.refs[0], angle.refs[1], metrics.centroid);
+      drawLabel(angle.vertex.x, angle.vertex.y, formatMeasurement(angle.value, 'angle'), {
+        offsetX: direction.x * 18,
+        offsetY: direction.y * 18
+      });
+    }
+    drawLabel(metrics.centroid.x, metrics.centroid.y, formatMeasurement(metrics.area, 'area'));
+  }
+
+  function centroid(points) {
+    if (!points.length) return { x: 0, y: 0 };
+    const sum = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+    return { x: sum.x / points.length, y: sum.y / points.length };
+  }
+
+  function drawLabel(x, y, text, options = {}) {
+    const { offsetX = 0, offsetY = 0, align = 'center', baseline = 'middle' } = options;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(1 / appState.viewport.zoom, 1 / appState.viewport.zoom);
+    ctx.translate(offsetX, offsetY);
+    ctx.font = '12px/1.4 sans-serif';
+    ctx.textAlign = align;
+    ctx.textBaseline = baseline;
+    ctx.fillStyle = '#111827';
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 4;
+    ctx.strokeText(text, 0, 0);
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
+  }
+
+  function drawSelectionHandles() {
+    if (!appState.selection.length) return;
+    const dpr = appState.viewport.dpr;
+    const zoom = appState.viewport.zoom;
+    const ctx2 = ctx;
+    ctx2.save();
+    ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx2.translate(appState.viewport.panX, appState.viewport.panY);
+    ctx2.scale(zoom, zoom);
+    for (const id of appState.selection) {
+      const annotation = appState.annotations.find(a => a.id === id);
+      if (!annotation) continue;
+      const bounds = annotationBounds(annotation);
+      if (!bounds) continue;
+      ctx2.save();
+      ctx2.strokeStyle = '#111827';
+      ctx2.lineWidth = 1 / zoom;
+      ctx2.setLineDash([6 / zoom, 6 / zoom]);
+      ctx2.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
+      ctx2.restore();
+      const handles = getAnnotationHandles(annotation);
+      if (!handles.length) continue;
+      drawAnnotationHandles(ctx2, handles, zoom);
+    }
+    ctx2.restore();
+  }
+
+  function drawAnnotationHandles(context, handles, zoom) {
+    if (!handles.length) return;
+    context.save();
+    const size = 8 / zoom;
+    context.fillStyle = '#2563eb';
+    context.strokeStyle = '#ffffff';
+    context.lineWidth = 1 / zoom;
+    for (const handle of handles) {
+      context.beginPath();
+      context.rect(handle.x - size / 2, handle.y - size / 2, size, size);
+      context.fill();
+      context.stroke();
+    }
+    context.restore();
+  }
+
+  function getAnnotationHandles(annotation) {
+    if (!annotation || !annotation.geometry) return [];
+    switch (annotation.type) {
+      case 'point': {
+        const { x, y } = annotation.geometry;
+        return Number.isFinite(x) && Number.isFinite(y)
+          ? [{ x, y, kind: 'vertex', index: 0 }]
+          : [];
+      }
+      case 'line': {
+        const { start, end } = annotation.geometry;
+        if (!start || !end) return [];
+        return [
+          { x: start.x, y: start.y, kind: 'vertex', index: 0 },
+          { x: end.x, y: end.y, kind: 'vertex', index: 1 }
+        ];
+      }
+      case 'polyline':
+      case 'polygon':
+      case 'triangle': {
+        const points = annotation.geometry.points || [];
+        return points
+          .map((pt, index) => (pt ? { x: pt.x, y: pt.y, kind: 'vertex', index } : null))
+          .filter(Boolean);
+      }
+      case 'rect':
+      case 'ellipse': {
+        const { x, y, width, height } = annotation.geometry;
+        if (
+          !Number.isFinite(x) ||
+          !Number.isFinite(y) ||
+          !Number.isFinite(width) ||
+          !Number.isFinite(height)
+        ) {
+          return [];
+        }
+        const x2 = x + width;
+        const y2 = y + height;
+        return [
+          { x, y, kind: 'corner', index: 0, anchor: { x: x2, y: y2 } },
+          { x: x2, y, kind: 'corner', index: 1, anchor: { x, y: y2 } },
+          { x: x2, y: y2, kind: 'corner', index: 2, anchor: { x, y } },
+          { x, y: y2, kind: 'corner', index: 3, anchor: { x: x2, y } }
+        ];
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        if (!a || !b || !c) return [];
+        return [
+          { x: a.x, y: a.y, kind: 'vertex', index: 0, key: 'a' },
+          { x: b.x, y: b.y, kind: 'vertex', index: 1, key: 'b' },
+          { x: c.x, y: c.y, kind: 'vertex', index: 2, key: 'c' }
+        ];
+      }
+      default:
+        return [];
+    }
+  }
+
+  function annotationBounds(annotation) {
+    switch (annotation.type) {
+      case 'point': {
+        const { x, y } = annotation.geometry;
+        return { x: x - 4, y: y - 4, width: 8, height: 8 };
+      }
+      case 'line': {
+        const { start, end } = annotation.geometry;
+        const minX = Math.min(start.x, end.x);
+        const minY = Math.min(start.y, end.y);
+        return { x: minX, y: minY, width: Math.abs(start.x - end.x), height: Math.abs(start.y - end.y) };
+      }
+      case 'rect':
+      case 'ellipse': {
+        return annotation.geometry;
+      }
+      case 'polyline':
+      case 'polygon':
+      case 'triangle': {
+        const xs = annotation.geometry.points.map(p => p.x);
+        const ys = annotation.geometry.points.map(p => p.y);
+        const minX = Math.min(...xs);
+        const minY = Math.min(...ys);
+        const maxX = Math.max(...xs);
+        const maxY = Math.max(...ys);
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        const xs = [a.x, b.x, c.x];
+        const ys = [a.y, b.y, c.y];
+        const minX = Math.min(...xs);
+        const minY = Math.min(...ys);
+        const maxX = Math.max(...xs);
+        const maxY = Math.max(...ys);
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      }
+      case 'text': {
+        const { position } = annotation.geometry;
+        return { x: position.x, y: position.y - 16, width: 120, height: 24 };
+      }
+      default:
+        return null;
+    }
+  }
+
+  function isAnnotationVisible(id) {
+    const annotation = appState.annotations.find(a => a.id === id);
+    if (!annotation || annotation.hidden) return false;
+    for (const layer of appState.layers) {
+      if (layerContainsAnnotation(layer, id) && layer.visible === false) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function isAnnotationLocked(id) {
+    const annotation = appState.annotations.find(a => a.id === id);
+    if (!annotation) return true;
+    if (annotation.locked) return true;
+    for (const layer of appState.layers) {
+      if (layerContainsAnnotation(layer, id) && layer.locked) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function shouldSnapOnPointerDown(mode) {
+    if (mode === 'pan' || mode === 'select') {
+      return false;
+    }
+    return true;
+  }
+
+  function shouldSnapDuringMove(mode, isDragging) {
+    if (mode === 'pan') {
+      return false;
+    }
+    if (mode === 'select') {
+      return !!isDragging;
+    }
+    return true;
+  }
+
+  function maybeSnapPoint(point, options = {}) {
+    const { includeDraft = true } = options;
+    if (!appState.settings.snapEnabled || appState.modifiers.ctrl) {
+      return { ...point };
+    }
+
+    const pxX = worldToScreenX(point.x);
+    const pxY = worldToScreenY(point.y);
+    let best = SNAP_DISTANCE;
+    let bestPoint = { x: point.x, y: point.y };
+
+    const considerPoint = candidate => {
+      if (!candidate) return;
+      if (!Number.isFinite(candidate.x) || !Number.isFinite(candidate.y)) return;
+      const sx = worldToScreenX(candidate.x);
+      const sy = worldToScreenY(candidate.y);
+      const dist = Math.hypot(sx - pxX, sy - pxY);
+      if (dist <= best) {
+        best = dist;
+        bestPoint = { x: candidate.x, y: candidate.y };
+      }
+    };
+
+    if (appState.image) {
+      const { width, height } = appState.image;
+      const corners = [
+        { x: 0, y: 0 },
+        { x: width, y: 0 },
+        { x: width, y: height },
+        { x: 0, y: height }
+      ];
+      corners.forEach(considerPoint);
+
+      const considerVerticalEdge = x => {
+        const sx = worldToScreenX(x);
+        const dx = Math.abs(sx - pxX);
+        if (dx > SNAP_DISTANCE) return;
+        const clampedY = clamp(point.y, 0, height);
+        const sy = worldToScreenY(clampedY);
+        const dist = Math.hypot(dx, sy - pxY);
+        if (dist <= best) {
+          best = dist;
+          bestPoint = { x, y: clampedY };
+        }
+      };
+
+      const considerHorizontalEdge = y => {
+        const sy = worldToScreenY(y);
+        const dy = Math.abs(sy - pxY);
+        if (dy > SNAP_DISTANCE) return;
+        const clampedX = clamp(point.x, 0, width);
+        const sx = worldToScreenX(clampedX);
+        const dist = Math.hypot(sx - pxX, dy);
+        if (dist <= best) {
+          best = dist;
+          bestPoint = { x: clampedX, y };
+        }
+      };
+
+      considerVerticalEdge(0);
+      considerVerticalEdge(width);
+      considerHorizontalEdge(0);
+      considerHorizontalEdge(height);
+    }
+
+    for (const annotation of appState.annotations) {
+      if (!isAnnotationVisible(annotation.id)) continue;
+      const pts = collectAnnotationPoints(annotation);
+      pts.forEach(considerPoint);
+    }
+
+    if (includeDraft && appState.draft) {
+      const draftPoints = collectAnnotationPoints(appState.draft, true);
+      draftPoints.forEach(considerPoint);
+    }
+
+    return bestPoint;
+  }
+
+  /* ==========================================
+     Tools & Interaction
+     ========================================== */
+
+  function setTool(tool) {
+    if (!TOOL_ORDER.includes(tool)) return;
+    appState.pointerMode = tool;
+    $$('#tool-palette button').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tool === tool);
+    });
+  }
+
+  function beginPointer(event) {
+    if (!canvas.contains(event.target)) return;
+    const rawPoint = toCanvasCoords(event.clientX, event.clientY);
+    const point = shouldSnapOnPointerDown(appState.pointerMode)
+      ? maybeSnapPoint(rawPoint)
+      : rawPoint;
+    appState.dragStart = point;
+    appState.lastPointer = point;
+
+    if (appState.pointerMode === 'pan') {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
+      return;
+    }
+
+    if (appState.pointerMode === 'select') {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
+      handleSelectDown(event);
+      return;
+    }
+
+    if (appState.pointerMode === 'calibrate') {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
+      startDrawing(event);
+      return;
+    }
+
+    if (PATH_TOOLS.has(appState.pointerMode)) {
+      canvas.setPointerCapture(event.pointerId);
+      appState.pointerId = event.pointerId;
+      if (!appState.draft || appState.draft.type !== appState.pointerMode) {
+        startDrawing(event);
+      }
+      return;
+    }
+
+    if (appState.pointerMode === 'angle') {
+      handleAnglePointerDown(event, point);
+      return;
+    }
+
+    canvas.setPointerCapture(event.pointerId);
+    appState.pointerId = event.pointerId;
+    startDrawing(event);
+  }
+
+  function movePointer(event) {
+    if (!canvas.contains(event.target)) return;
+    const rawPoint = toCanvasCoords(event.clientX, event.clientY);
+    const isDragging = appState.pointerId === event.pointerId && event.buttons !== 0;
+    const point = shouldSnapDuringMove(appState.pointerMode, isDragging)
+      ? maybeSnapPoint(rawPoint)
+      : rawPoint;
+    appState.lastPointer = point;
+    updateStatusCoords(point);
+
+    const angleUpdated = updateAngleHover(point, event);
+    if (appState.pointerMode === 'angle' && appState.pointerId !== event.pointerId) {
+      if (angleUpdated) scheduleRedraw();
+      return;
+    }
+
+    if (appState.pointerId !== event.pointerId) {
+      scheduleRedraw();
+      return;
+    }
+
+    if (appState.pointerMode === 'pan') {
+      const dx = event.movementX * appState.viewport.dpr;
+      const dy = event.movementY * appState.viewport.dpr;
+      appState.viewport.panX += dx;
+      appState.viewport.panY += dy;
+      scheduleRedraw();
+      return;
+    }
+
+    if (appState.pointerMode === 'select') {
+      handleSelectMove(event, point);
+      return;
+    }
+
+    updateDraft(point, event);
+  }
+
+  function endPointer(event) {
+    if (appState.pointerId !== event.pointerId) return;
+    canvas.releasePointerCapture(event.pointerId);
+    appState.pointerId = null;
+
+    if (appState.pointerMode === 'pan') return;
+
+    if (appState.pointerMode === 'select') {
+      handleSelectUp(event);
+      return;
+    }
+
+    if (PATH_TOOLS.has(appState.pointerMode) && appState.draft && appState.draft.type === appState.pointerMode) {
+      const rawPoint = toCanvasCoords(event.clientX, event.clientY);
+      const geom = appState.draft.geometry;
+      const anchor = geom.points[geom.points.length - 2];
+      const constrained = isShiftPressed(event) && anchor
+        ? constrainPointToAngle(anchor, rawPoint)
+        : { ...rawPoint };
+      const snapped = maybeSnapPoint(constrained);
+      geom.points[geom.points.length - 1] = snapped;
+      const effective = effectivePathPoints(geom.points);
+      if (appState.pointerMode === 'polyline') {
+        updatePolylineMeasurement(effective);
+      } else {
+        updateMeasurementStatus(
+          effective.length >= 3 ? polygonArea(effective) : null,
+          'area'
+        );
+      }
+      geom.points.push({ ...snapped });
+      scheduleRedraw();
+      return;
+    }
+
+    finishDrawing();
+  }
+
+  function cancelPointer(event) {
+    if (appState.pointerId === event.pointerId) {
+      canvas.releasePointerCapture(event.pointerId);
+      appState.pointerId = null;
+      appState.draft = null;
+      activeHandle = null;
+      scheduleRedraw();
+      updateMeasurementStatus(null);
+    }
+  }
+
+  function handleWheel(event) {
+    event.preventDefault();
+    const delta = Math.sign(event.deltaY);
+    const zoomFactor = delta > 0 ? 0.9 : 1.1;
+    const newZoom = clamp(appState.viewport.zoom * zoomFactor, MIN_ZOOM, MAX_ZOOM);
+    const rect = canvas.getBoundingClientRect();
+    const cx = (event.clientX - rect.left) * appState.viewport.dpr;
+    const cy = (event.clientY - rect.top) * appState.viewport.dpr;
+
+    const prev = {
+      x: (cx - appState.viewport.panX) / appState.viewport.zoom,
+      y: (cy - appState.viewport.panY) / appState.viewport.zoom
+    };
+
+    appState.viewport.zoom = newZoom;
+    appState.viewport.panX = cx - prev.x * newZoom;
+    appState.viewport.panY = cy - prev.y * newZoom;
+
+    updateZoomStatus();
+    scheduleRedraw();
+  }
+
+  function updateStatusCoords(point) {
+    $('#status-coords').textContent = `x: ${formatNumber(point.x, 1)} px, y: ${formatNumber(point.y, 1)} px`;
+  }
+
+  function updateZoomStatus() {
+    $('#status-zoom').textContent = `Zoom: ${formatNumber(appState.viewport.zoom * 100, 0)}%`;
+  }
+
+  /* Drawing workflow */
+
+  function startDrawing(event) {
+    const base = {
+      id: createId('ann'),
+      type: appState.pointerMode,
+      layerId: 'base',
+      style: {
+        stroke: TOOL_DEFAULTS.stroke,
+        fill: TOOL_DEFAULTS.fill,
+        strokeWidth: TOOL_DEFAULTS.strokeWidth,
+        opacity: TOOL_DEFAULTS.opacity,
+        textColor: TOOL_DEFAULTS.textColor,
+        textSize: TOOL_DEFAULTS.textSize
+      }
+    };
+
+    const start = appState.dragStart;
+
+    switch (appState.pointerMode) {
+      case 'point':
+        appState.draft = {
+          ...base,
+          geometry: { x: start.x, y: start.y }
+        };
+        break;
+      case 'line':
+        appState.draft = {
+          ...base,
+          geometry: { start: { ...start }, end: { ...start } }
+        };
+        break;
+      case 'polyline':
+        appState.draft = {
+          ...base,
+          geometry: { points: [{ ...start }, { ...start }] }
+        };
+        break;
+      case 'rect':
+        appState.draft = {
+          ...base,
+          geometry: { x: start.x, y: start.y, width: 0, height: 0 }
+        };
+        break;
+      case 'ellipse':
+        appState.draft = {
+          ...base,
+          geometry: { x: start.x, y: start.y, width: 0, height: 0 }
+        };
+        break;
+      case 'polygon':
+        appState.draft = {
+          ...base,
+          geometry: { points: [{ ...start }, { ...start }] }
+        };
+        break;
+      case 'triangle':
+        appState.draft = {
+          ...base,
+          geometry: { points: [{ ...start }, { ...start }, { ...start }] }
+        };
+        break;
+      case 'angle':
+        appState.draft = {
+          ...base,
+          geometry: { a: { ...start }, b: { ...start }, c: { ...start }, stage: 1 }
+        };
+        break;
+      case 'calibrate':
+        appState.draft = {
+          ...base,
+          type: 'calibrate',
+          geometry: { start: { ...start }, end: { ...start } }
+        };
+        break;
+      case 'text': {
+        const content = prompt('Text content');
+        if (!content) {
+          appState.draft = null;
+          return;
+        }
+        appState.draft = {
+          ...base,
+          geometry: { position: { ...start }, content }
+        };
+        finishDrawing();
+        return;
+      }
+      default:
+        appState.draft = null;
+    }
+    scheduleRedraw();
+  }
+
+  function updateDraft(point, event) {
+    if (!appState.draft) return;
+    const draft = appState.draft;
+    const shift = isShiftPressed(event);
+    switch (draft.type) {
+      case 'point':
+        draft.geometry = maybeSnapPoint({ x: point.x, y: point.y });
+        break;
+      case 'line':
+        draft.geometry.end = maybeSnapPoint(
+          shift
+            ? constrainPointToAngle(draft.geometry.start, point)
+            : { ...point }
+        );
+        updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end), 'length');
+        break;
+      case 'polyline':
+        draft.geometry.points[draft.geometry.points.length - 1] = (() => {
+          if (!shift) return maybeSnapPoint({ ...point });
+          const anchor = draft.geometry.points[draft.geometry.points.length - 2];
+          const constrained = anchor ? constrainPointToAngle(anchor, point) : { ...point };
+          return maybeSnapPoint(constrained);
+        })();
+        updatePolylineMeasurement(effectivePathPoints(draft.geometry.points));
+        break;
+      case 'rect':
+        draft.geometry = normalizedRect(
+          appState.dragStart,
+          maybeSnapPoint(
+            shift ? constrainCornerToSquare(appState.dragStart, point) : { ...point }
+          )
+        );
+        updateMeasurementStatus(
+          { width: draft.geometry.width, height: draft.geometry.height },
+          'rectSides'
+        );
+        break;
+      case 'ellipse':
+        draft.geometry = normalizedRect(
+          appState.dragStart,
+          maybeSnapPoint(
+            shift ? constrainCornerToSquare(appState.dragStart, point) : { ...point }
+          )
+        );
+        updateMeasurementStatus(Math.PI * Math.abs(draft.geometry.width / 2) * Math.abs(draft.geometry.height / 2), 'area');
+        break;
+      case 'polygon':
+        draft.geometry.points[draft.geometry.points.length - 1] = (() => {
+          if (!shift) return maybeSnapPoint({ ...point });
+          const anchor = draft.geometry.points[draft.geometry.points.length - 2];
+          const constrained = anchor ? constrainPointToAngle(anchor, point) : { ...point };
+          return maybeSnapPoint(constrained);
+        })();
+        const polyPoints = effectivePathPoints(draft.geometry.points);
+        if (polyPoints.length >= 3) {
+          updateMeasurementStatus(polygonArea(polyPoints), 'area');
+        } else {
+          updateMeasurementStatus(null, 'area');
+        }
+        break;
+      case 'triangle': {
+        const rect = normalizedRect(appState.dragStart, maybeSnapPoint({ ...point }));
+        const apex = { x: rect.x + rect.width / 2, y: rect.y };
+        const left = { x: rect.x, y: rect.y + rect.height };
+        const right = { x: rect.x + rect.width, y: rect.y + rect.height };
+        draft.geometry.points = [left, right, apex];
+        const area = Math.abs(rect.width * rect.height) / 2;
+        updateMeasurementStatus(area, 'area');
+        break;
+      }
+      case 'angle':
+        updateAngleHover(point, event);
+        break;
+      case 'calibrate':
+        draft.geometry.end = maybeSnapPoint(
+          shift
+            ? constrainPointToAngle(draft.geometry.start, point)
+            : { ...point }
+        );
+        updateMeasurementStatus(lengthBetween(draft.geometry.start, draft.geometry.end), 'length');
+        break;
+    }
+    scheduleRedraw();
+  }
+
+  function trimDraftGeometry(draft) {
+    if (!draft) return;
+    if (PATH_TOOLS.has(draft.type)) {
+      const pts = draft.geometry.points;
+      if (pts.length >= 2) {
+        const last = pts[pts.length - 1];
+        const prev = pts[pts.length - 2];
+        if (last.x === prev.x && last.y === prev.y) {
+          pts.pop();
+        }
+      }
+    }
+  }
+
+  function finishDrawing() {
+    if (!appState.draft) return;
+    const draft = appState.draft;
+    trimDraftGeometry(draft);
+
+    if (draft.type === 'calibrate') {
+      const success = applyCalibration(draft);
+      appState.draft = null;
+      scheduleRedraw();
+      if (!success) {
+        updateMeasurementStatus(null);
+      }
+      return;
+    }
+
+    if (!validateDraft(draft)) {
+      toast('Incomplete annotation discarded');
+      appState.draft = null;
+      scheduleRedraw();
+      updateMeasurementStatus(null);
+      return;
+    }
+
+    commitAnnotation(draft);
+    appState.draft = null;
+    scheduleRedraw();
+    updateMeasurementStatus(null);
+  }
+
+  function validateDraft(draft) {
+    switch (draft.type) {
+      case 'line':
+        return lengthBetween(draft.geometry.start, draft.geometry.end) > 1;
+      case 'polyline':
+        return draft.geometry.points.length >= 2;
+      case 'polygon':
+        return draft.geometry.points.length >= 3;
+      case 'triangle':
+        if (!draft.geometry.points || draft.geometry.points.length < 3) return false;
+        return Math.abs(polygonArea(draft.geometry.points)) > 1;
+      case 'rect':
+      case 'ellipse':
+        return Math.abs(draft.geometry.width) > 1 && Math.abs(draft.geometry.height) > 1;
+      case 'angle':
+        return draft.geometry.stage >= 3;
+      case 'calibrate':
+        return lengthBetween(draft.geometry.start, draft.geometry.end) > 1;
+      default:
+        return true;
+    }
+  }
+
+  function commitAnnotation(annotation) {
+    const ann = deepClone(annotation);
+    delete ann.geometry.stage;
+    ann.hidden = !!ann.hidden;
+    ann.locked = !!ann.locked;
+    appState.annotations.push(ann);
+    const baseLayer = appState.layers.find(layer => layer.id === 'base');
+    if (baseLayer) {
+      baseLayer.children.push(ann.id);
+    }
+    appState.selection = [ann.id];
+    pushHistory('Create annotation');
+    refreshUI();
+  }
+
+  function applyCalibration(draft) {
+    const distance = lengthBetween(draft.geometry.start, draft.geometry.end);
+    if (distance <= 0) {
+      toast('Calibration distance too small');
+      return false;
+    }
+    const defaultDistance = appState.calibration
+      ? formatNumber(distance * appState.calibration.ratio, 2)
+      : '';
+    const valueInput = prompt('Enter real-world distance for the selected span', defaultDistance);
+    if (valueInput == null) {
+      toast('Calibration cancelled');
+      return false;
+    }
+    const value = Number(valueInput);
+    if (!Number.isFinite(value) || value <= 0) {
+      toast('Calibration requires a positive number');
+      return false;
+    }
+    const unitInput = prompt('Enter unit (e.g., mm, cm, m, in, ft)', appState.calibration?.unit || 'cm');
+    if (unitInput == null || !unitInput.trim()) {
+      toast('Calibration requires a unit');
+      return false;
+    }
+    appState.calibration = {
+      ratio: value / distance,
+      unit: unitInput.trim()
+    };
+    pushHistory('Set calibration');
+    updateMeasurementStatus(null);
+    toast(`Scale set to ${formatNumber(appState.calibration.ratio, 4)} ${appState.calibration.unit}/px`);
+    setTool('select');
+    refreshUI();
+    return true;
+  }
+
+  function updatePolylineMeasurement(points) {
+    if (points.length < 2) {
+      updateMeasurementStatus(null);
+      return;
+    }
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += lengthBetween(points[i - 1], points[i]);
+    }
+    updateMeasurementStatus(total, 'length');
+  }
+
+  function updateMeasurementStatus(value, kind = 'length') {
+    const scaleInfo = appState.calibration
+      ? ` (1px = ${formatNumber(appState.calibration.ratio, 6)} ${appState.calibration.unit})`
+      : '';
+    const statusEl = $('#status-measure');
+
+    if (kind === 'rectSides') {
+      if (
+        !value ||
+        !Number.isFinite(value.width) ||
+        !Number.isFinite(value.height)
+      ) {
+        statusEl.textContent = `Measure: –${scaleInfo}`;
+      } else {
+        const widthText = formatMeasurement(Math.abs(value.width), 'length');
+        const heightText = formatMeasurement(Math.abs(value.height), 'length');
+        statusEl.textContent = `Lengths: W ${widthText} × H ${heightText}`;
+      }
+      return;
+    }
+
+    if (value == null) {
+      statusEl.textContent = `Measure: –${scaleInfo}`;
+    } else {
+      const label = kind === 'area' ? 'Area' : kind === 'angle' ? 'Angle' : 'Length';
+      statusEl.textContent = `${label}: ${formatMeasurement(value, kind)}`;
+    }
+  }
+
+  function createAngleDraft(start) {
+    return {
+      id: createId('ann'),
+      type: 'angle',
+      layerId: 'base',
+      style: {
+        stroke: TOOL_DEFAULTS.stroke,
+        fill: TOOL_DEFAULTS.fill,
+        strokeWidth: TOOL_DEFAULTS.strokeWidth,
+        opacity: TOOL_DEFAULTS.opacity,
+        textColor: TOOL_DEFAULTS.textColor,
+        textSize: TOOL_DEFAULTS.textSize
+      },
+      geometry: {
+        a: { ...start },
+        b: { ...start },
+        c: { ...start },
+        stage: 1
+      }
+    };
+  }
+
+  function updateAngleHover(point, event) {
+    if (!appState.draft || appState.draft.type !== 'angle') return false;
+    const geom = appState.draft.geometry;
+    const shift = isShiftPressed(event);
+    if (geom.stage === 1) {
+      const target = shift ? constrainPointToAngle(geom.a, point) : { ...point };
+      geom.b = maybeSnapPoint(target);
+      updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
+      return true;
+    }
+    if (geom.stage === 2) {
+      const target = shift ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      geom.c = maybeSnapPoint(target);
+      updateMeasurementStatus(angleBetween(geom.a, geom.b, geom.c), 'angle');
+      return true;
+    }
+    return false;
+  }
+
+  function handleAngleClick(event) {
+    if (appState.pointerMode !== 'angle') return;
+    const point = maybeSnapPoint(toCanvasCoords(event.clientX, event.clientY));
+    if (!appState.draft || appState.draft.type !== 'angle') {
+      appState.draft = createAngleDraft(point);
+      scheduleRedraw();
+      return;
+    }
+    const geom = appState.draft.geometry;
+    if (geom.stage === 1) {
+      const target = isShiftPressed(event) ? constrainPointToAngle(geom.a, point) : { ...point };
+      geom.b = maybeSnapPoint(target);
+      geom.stage = 2;
+      updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
+      scheduleRedraw();
+      return;
+    }
+    if (geom.stage === 2) {
+      const target = isShiftPressed(event) ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      geom.c = maybeSnapPoint(target);
+      geom.stage = 3;
+      finishDrawing();
+    }
+  }
+
+  function handleAnglePointerDown(event, point) {
+    if (!appState.draft || appState.draft.type !== 'angle' || appState.draft.geometry.stage >= 3) {
+      appState.draft = createAngleDraft(point);
+      scheduleRedraw();
+      return;
+    }
+    const geom = appState.draft.geometry;
+    if (geom.stage === 1) {
+      const target = isShiftPressed(event) ? constrainPointToAngle(geom.a, point) : { ...point };
+      geom.b = maybeSnapPoint(target);
+      updateMeasurementStatus(lengthBetween(geom.a, geom.b), 'length');
+    } else if (geom.stage === 2) {
+      const target = isShiftPressed(event) ? constrainAngleSpan(geom.b, geom.a, point) : { ...point };
+      geom.c = maybeSnapPoint(target);
+      updateMeasurementStatus(angleBetween(geom.a, geom.b, geom.c), 'angle');
+    }
+    scheduleRedraw();
+  }
+
+  function normalizedRect(start, end) {
+    const x = Math.min(start.x, end.x);
+    const y = Math.min(start.y, end.y);
+    const width = Math.abs(start.x - end.x);
+    const height = Math.abs(start.y - end.y);
+    return { x, y, width, height };
+  }
+
+  /* Selection */
+
+  function findAnnotationHandle(point) {
+    const threshold = 10 / appState.viewport.zoom;
+    for (let i = appState.annotations.length - 1; i >= 0; i--) {
+      const annotation = appState.annotations[i];
+      if (!isAnnotationVisible(annotation.id)) continue;
+      if (isAnnotationLocked(annotation.id)) continue;
+      const handles = getAnnotationHandles(annotation);
+      for (const handle of handles) {
+        const dist = Math.hypot(point.x - handle.x, point.y - handle.y);
+        if (dist <= threshold) {
+          return { annotation, handle };
+        }
+      }
+    }
+    return null;
+  }
+
+  function handleSelectDown(event) {
+    activeHandle = null;
+    const point = toCanvasCoords(event.clientX, event.clientY);
+    const handleHit = findAnnotationHandle(point);
+    if (handleHit) {
+      activeHandle = {
+        annotation: handleHit.annotation,
+        index: handleHit.handle.index,
+        kind: handleHit.handle.kind,
+        key: handleHit.handle.key,
+        anchor: handleHit.handle.anchor ? { ...handleHit.handle.anchor } : null
+      };
+      if (!appState.selection.includes(handleHit.annotation.id)) {
+        appState.selection = [handleHit.annotation.id];
+      }
+      appState.dragStart = point;
+      appState.lastPointer = point;
+      updateHandleMeasurement(handleHit.annotation);
+      refreshUI();
+      scheduleRedraw();
+      return;
+    }
+
+    const hit = hitTest(point);
+    if (hit) {
+      if (!isShiftPressed(event)) {
+        appState.selection = [hit.id];
+      } else if (!appState.selection.includes(hit.id)) {
+        appState.selection.push(hit.id);
+      }
+      appState.dragStart = point;
+      appState.lastPointer = appState.dragStart;
+    } else {
+      appState.selection = [];
+    }
+    refreshUI();
+    scheduleRedraw();
+  }
+
+  function handleSelectMove(event, point) {
+    if (!appState.selection.length || !event.buttons) return;
+    if (activeHandle) {
+      const annotation = activeHandle.annotation;
+      if (!annotation || isAnnotationLocked(annotation.id)) return;
+      if (!applyHandleDrag(annotation, activeHandle, point, event)) return;
+      updateHandleMeasurement(annotation);
+      appState.lastPointer = point;
+      scheduleRedraw();
+      return;
+    }
+    const dx = point.x - appState.lastPointer.x;
+    const dy = point.y - appState.lastPointer.y;
+    if (!dx && !dy) return;
+    for (const id of appState.selection) {
+      const annotation = appState.annotations.find(a => a.id === id);
+      if (annotation && !isAnnotationLocked(annotation.id)) {
+        translateAnnotation(annotation, dx, dy);
+      }
+    }
+    appState.lastPointer = point;
+    scheduleRedraw();
+  }
+
+  function inferOppositeCorner(rect, index) {
+    if (!rect) return null;
+    const { x, y, width, height } = rect;
+    const x2 = x + width;
+    const y2 = y + height;
+    const anchors = [
+      { x: x2, y: y2 },
+      { x, y: y2 },
+      { x, y },
+      { x: x2, y }
+    ];
+    return anchors[index] ? { ...anchors[index] } : null;
+  }
+
+  function applyHandleDrag(annotation, handle, point, event) {
+    switch (annotation.type) {
+      case 'point': {
+        const snapped = maybeSnapPoint(point);
+        annotation.geometry.x = snapped.x;
+        annotation.geometry.y = snapped.y;
+        return true;
+      }
+      case 'line': {
+        const other = handle.index === 0 ? annotation.geometry.end : annotation.geometry.start;
+        const target = other && isShiftPressed(event) ? constrainPointToAngle(other, point) : point;
+        const snapped = maybeSnapPoint(target);
+        if (handle.index === 0) {
+          annotation.geometry.start = { ...snapped };
+        } else {
+          annotation.geometry.end = { ...snapped };
+        }
+        return true;
+      }
+      case 'polyline':
+      case 'polygon':
+      case 'triangle': {
+        const points = annotation.geometry.points;
+        if (!points || !points[handle.index]) return false;
+        const snapped = maybeSnapPoint(point);
+        points[handle.index] = { x: snapped.x, y: snapped.y };
+        return true;
+      }
+      case 'rect':
+      case 'ellipse': {
+        const anchor = handle.anchor || inferOppositeCorner(annotation.geometry, handle.index);
+        if (!anchor) return false;
+        const target = isShiftPressed(event) ? constrainCornerToSquare(anchor, point) : point;
+        const snapped = maybeSnapPoint(target);
+        const rect = normalizedRect(anchor, snapped);
+        annotation.geometry.x = rect.x;
+        annotation.geometry.y = rect.y;
+        annotation.geometry.width = rect.width;
+        annotation.geometry.height = rect.height;
+        return true;
+      }
+      case 'angle': {
+        if (!handle.key) return false;
+        const snapped = maybeSnapPoint(point);
+        annotation.geometry[handle.key] = { x: snapped.x, y: snapped.y };
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  function updateHandleMeasurement(annotation) {
+    switch (annotation.type) {
+      case 'line': {
+        const { start, end } = annotation.geometry;
+        if (start && end) {
+          updateMeasurementStatus(lengthBetween(start, end), 'length');
+        } else {
+          updateMeasurementStatus(null);
+        }
+        break;
+      }
+      case 'polyline': {
+        const points = annotation.geometry.points || [];
+        updateMeasurementStatus(points.length >= 2 ? polylineLength(points) : null, 'length');
+        break;
+      }
+      case 'polygon':
+      case 'triangle': {
+        const points = annotation.geometry.points || [];
+        updateMeasurementStatus(points.length >= 3 ? polygonArea(points) : null, 'area');
+        break;
+      }
+      case 'rect': {
+        const { width, height } = annotation.geometry;
+        if (!Number.isFinite(width) || !Number.isFinite(height)) {
+          updateMeasurementStatus(null);
+        } else {
+          updateMeasurementStatus({ width, height }, 'rectSides');
+        }
+        break;
+      }
+      case 'ellipse': {
+        const { width, height } = annotation.geometry;
+        const area = Math.PI * Math.abs(width / 2) * Math.abs(height / 2);
+        updateMeasurementStatus(area > 0 ? area : null, 'area');
+        break;
+      }
+      case 'angle': {
+        const { a, b, c } = annotation.geometry;
+        if (a && b && c) {
+          updateMeasurementStatus(angleBetween(a, b, c), 'angle');
+        } else {
+          updateMeasurementStatus(null);
+        }
+        break;
+      }
+      default:
+        updateMeasurementStatus(null);
+    }
+  }
+
+  function handleSelectUp(event) {
+    if (activeHandle) {
+      pushHistory('Adjust annotation handle');
+      activeHandle = null;
+      updateMeasurementStatus(null);
+      return;
+    }
+    if (event.detail === 2) {
+      const hit = hitTest(toCanvasCoords(event.clientX, event.clientY));
+      if (hit && hit.type === 'text') {
+        const newText = prompt('Edit text', hit.geometry.content);
+        if (newText != null) {
+          hit.geometry.content = newText;
+          pushHistory('Edit text');
+          scheduleRedraw();
+          refreshUI();
+        }
+      }
+    }
+    pushHistory('Move annotations');
+  }
+
+  function translateAnnotation(annotation, dx, dy) {
+    switch (annotation.type) {
+      case 'point':
+        annotation.geometry.x += dx;
+        annotation.geometry.y += dy;
+        break;
+      case 'line':
+        annotation.geometry.start.x += dx;
+        annotation.geometry.start.y += dy;
+        annotation.geometry.end.x += dx;
+        annotation.geometry.end.y += dy;
+        break;
+      case 'polyline':
+      case 'polygon':
+      case 'triangle':
+        for (const p of annotation.geometry.points) {
+          p.x += dx;
+          p.y += dy;
+        }
+        break;
+      case 'rect':
+      case 'ellipse':
+        annotation.geometry.x += dx;
+        annotation.geometry.y += dy;
+        break;
+      case 'angle':
+        annotation.geometry.a.x += dx;
+        annotation.geometry.a.y += dy;
+        annotation.geometry.b.x += dx;
+        annotation.geometry.b.y += dy;
+        annotation.geometry.c.x += dx;
+        annotation.geometry.c.y += dy;
+        break;
+      case 'text':
+        annotation.geometry.position.x += dx;
+        annotation.geometry.position.y += dy;
+        break;
+    }
+  }
+
+  function classifyLineAxis(annotation) {
+    const { start, end } = annotation.geometry;
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      return dx >= 0 ? 'right' : 'left';
+    }
+    return 'vertical';
+  }
+
+  function extendSelectedLinesToVanishingPoints() {
+    const targets = appState.selection
+      .map(id => appState.annotations.find(a => a && a.id === id))
+      .filter(annotation => annotation && annotation.type === 'line' && !isAnnotationLocked(annotation.id));
+    if (!targets.length) {
+      toast('Select one or more unlocked lines to extend');
+      return;
+    }
+
+    let changed = false;
+    for (const line of targets) {
+      const lineLength = lengthBetween(line.geometry.start, line.geometry.end);
+      if (lineLength < 0.01) continue;
+      const axis = classifyLineAxis(line);
+      const vp = appState.vanishingPoints?.[axis];
+      if (!vp) continue;
+      const startDist = lengthBetween(line.geometry.start, vp);
+      const endDist = lengthBetween(line.geometry.end, vp);
+      if (startDist >= endDist) {
+        line.geometry.start = { ...vp };
+      } else {
+        line.geometry.end = { ...vp };
+      }
+      line.style.stroke = VANISH_COLORS[axis] || line.style.stroke;
+      changed = true;
+    }
+
+    if (changed) {
+      pushHistory('Extend lines to vanishing points');
+      scheduleRedraw();
+      refreshUI();
+      updateMeasurementStatus(null);
+      toast('Lines extended to vanishing points');
+    } else {
+      toast('Set vanishing points before extending lines');
+    }
+  }
+
+  function hitTest(point) {
+    for (let i = appState.annotations.length - 1; i >= 0; i--) {
+      const annotation = appState.annotations[i];
+      if (!isAnnotationVisible(annotation.id)) continue;
+      const bounds = annotationBounds(annotation);
+      if (!bounds) continue;
+      if (
+        point.x >= bounds.x - 6 &&
+        point.x <= bounds.x + bounds.width + 6 &&
+        point.y >= bounds.y - 6 &&
+        point.y <= bounds.y + bounds.height + 6
+      ) {
+        return annotation;
+      }
+    }
+    return null;
+  }
+
+  /* ==========================================
+     Layers & Properties
+     ========================================== */
+
+  function refreshUI() {
+    refreshLayers();
+    refreshAnnotationsList();
+    refreshProperties();
+    updateUndoRedoButtons();
+  }
+
+  function findLayerById(id) {
+    return appState.layers.find(layer => layer.id === id) || null;
+  }
+
+  function layerContainsAnnotation(layer, annotationId) {
+    if (!layer || !layer.children) return false;
+    for (const child of layer.children) {
+      if (child === annotationId) return true;
+      const childLayer = findLayerById(child);
+      if (childLayer && layerContainsAnnotation(childLayer, annotationId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function gatherAnnotationIds(layer) {
+    const ids = [];
+    if (!layer || !layer.children) return ids;
+    for (const child of layer.children) {
+      const childLayer = findLayerById(child);
+      if (childLayer) {
+        ids.push(...gatherAnnotationIds(childLayer));
+      } else {
+        ids.push(child);
+      }
+    }
+    return ids;
+  }
+
+  function toggleAnnotationVisibility(annotation) {
+    annotation.hidden = !annotation.hidden;
+    if (annotation.hidden) {
+      appState.selection = appState.selection.filter(id => id !== annotation.id);
+    }
+    scheduleRedraw();
+    pushHistory('Toggle annotation visibility');
+    refreshUI();
+  }
+
+  function toggleAnnotationLock(annotation) {
+    annotation.locked = !annotation.locked;
+    pushHistory('Toggle annotation lock');
+    refreshUI();
+  }
+
+  function toggleLayerVisibility(layer) {
+    layer.visible = layer.visible === false ? true : false;
+    if (layer.visible === false) {
+      const ids = gatherAnnotationIds(layer);
+      if (ids.length) {
+        appState.selection = appState.selection.filter(id => !ids.includes(id));
+      }
+    }
+    scheduleRedraw();
+    pushHistory('Toggle layer visibility');
+    refreshUI();
+  }
+
+  function toggleLayerLock(layer) {
+    layer.locked = !layer.locked;
+    pushHistory('Toggle layer lock');
+    refreshUI();
+  }
+
+  function refreshLayers() {
+    const list = $('#layer-list');
+    list.innerHTML = '';
+    for (const layer of appState.layers) {
+      list.appendChild(renderLayerTree(layer, 0));
+    }
+  }
+
+  function renderLayerTree(layer, depth) {
+    const item = document.createElement('li');
+    item.className = 'layer-item';
+    item.dataset.id = layer.id;
+    if (layer.visible === false) {
+      item.classList.add('hidden');
+    }
+    if (layer.locked) {
+      item.classList.add('locked');
+    }
+    const row = document.createElement('div');
+    row.className = 'layer-row';
+    row.style.paddingLeft = `${depth * 12}px`;
+
+    const visBtn = document.createElement('button');
+    visBtn.textContent = layer.visible === false ? '🙈' : '👁';
+    visBtn.title = layer.visible === false ? 'Show layer' : 'Hide layer';
+    visBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleLayerVisibility(layer);
+    });
+    row.appendChild(visBtn);
+
+    const lockBtn = document.createElement('button');
+    lockBtn.textContent = layer.locked ? '🔒' : '🔓';
+    lockBtn.title = layer.locked ? 'Unlock layer' : 'Lock layer';
+    lockBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleLayerLock(layer);
+    });
+    row.appendChild(lockBtn);
+
+    const title = document.createElement('span');
+    title.textContent = layer.name;
+    row.appendChild(title);
+
+    const meta = document.createElement('span');
+    meta.className = 'layer-meta';
+    const layerCount = gatherAnnotationIds(layer).length;
+    meta.textContent = layerCount === 1 ? '1 item' : `${layerCount} items`;
+    row.appendChild(meta);
+
+    row.addEventListener('click', () => {
+      const ids = gatherAnnotationIds(layer);
+      if (ids.length) {
+        appState.selection = ids;
+        scheduleRedraw();
+        refreshUI();
+      }
+    });
+
+    item.appendChild(row);
+
+    if (layer.children && layer.children.length) {
+      const childList = document.createElement('ul');
+      childList.className = 'layer-children';
+      for (const child of layer.children) {
+        const childLayer = findLayerById(child);
+        if (childLayer) {
+          childList.appendChild(renderLayerTree(childLayer, depth + 1));
+        } else {
+          const annotation = appState.annotations.find(a => a.id === child);
+          if (annotation) {
+            childList.appendChild(renderLayerAnnotation(annotation, depth + 1));
+          }
+        }
+      }
+      if (childList.children.length) {
+        item.appendChild(childList);
+      }
+    }
+
+    return item;
+  }
+
+  function renderLayerAnnotation(annotation, depth) {
+    const item = document.createElement('li');
+    item.className = 'layer-item layer-annotation';
+    if (appState.selection.includes(annotation.id)) {
+      item.classList.add('selected');
+    }
+    if (annotation.hidden) {
+      item.classList.add('hidden');
+    }
+    if (annotation.locked) {
+      item.classList.add('locked');
+    }
+    const row = document.createElement('div');
+    row.className = 'layer-row';
+    row.style.paddingLeft = `${depth * 12}px`;
+
+    const visBtn = document.createElement('button');
+    visBtn.textContent = annotation.hidden ? '🙈' : '👁';
+    visBtn.title = annotation.hidden ? 'Show annotation' : 'Hide annotation';
+    visBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleAnnotationVisibility(annotation);
+    });
+    row.appendChild(visBtn);
+
+    const lockBtn = document.createElement('button');
+    lockBtn.textContent = annotation.locked ? '🔒' : '🔓';
+    lockBtn.title = annotation.locked ? 'Unlock annotation' : 'Lock annotation';
+    lockBtn.addEventListener('click', event => {
+      event.stopPropagation();
+      toggleAnnotationLock(annotation);
+    });
+    row.appendChild(lockBtn);
+
+    const title = document.createElement('span');
+    title.textContent = annotationDisplayName(annotation);
+    row.appendChild(title);
+
+    const measurement = measurementForAnnotation(annotation);
+    if (measurement) {
+      const meta = document.createElement('span');
+      meta.className = 'layer-meta';
+      meta.textContent = `${measurementLabel(measurement.kind)}: ${formatMeasurement(measurement.value, measurement.kind)}`;
+      row.appendChild(meta);
+    }
+
+    if (annotation.type === 'triangle') {
+      const triText = triangleSummary(annotation.geometry.points);
+      if (triText) {
+        const triMeta = document.createElement('span');
+        triMeta.className = 'layer-meta';
+        triMeta.textContent = triText;
+        row.appendChild(triMeta);
+      }
+    }
+
+    if (annotation.type === 'rect') {
+      const rectText = rectangleSummary(annotation.geometry);
+      if (rectText) {
+        const rectMeta = document.createElement('span');
+        rectMeta.className = 'layer-meta';
+        rectMeta.textContent = rectText;
+        row.appendChild(rectMeta);
+      }
+    }
+
+    row.addEventListener('click', () => {
+      appState.selection = [annotation.id];
+      scheduleRedraw();
+      refreshUI();
+    });
+
+    item.appendChild(row);
+    return item;
+  }
+
+  function refreshAnnotationsList() {
+    const list = $('#annotation-list');
+    list.innerHTML = '';
+    for (const annotation of appState.annotations) {
+      const item = document.createElement('li');
+      item.className = 'annotation-item';
+      item.dataset.id = annotation.id;
+      if (appState.selection.includes(annotation.id)) {
+        item.classList.add('selected');
+      }
+      if (annotation.hidden || !isAnnotationVisible(annotation.id)) {
+        item.classList.add('hidden');
+      }
+      const row = document.createElement('div');
+      row.className = 'annotation-row';
+      row.addEventListener('click', () => {
+        appState.selection = [annotation.id];
+        scheduleRedraw();
+        refreshUI();
+      });
+
+      const name = document.createElement('span');
+      name.textContent = annotationDisplayName(annotation);
+      row.appendChild(name);
+
+      const measurement = measurementForAnnotation(annotation);
+      if (measurement) {
+        const measurementEl = document.createElement('span');
+        measurementEl.className = 'annotation-measurement';
+        measurementEl.textContent = `${measurementLabel(measurement.kind)}: ${formatMeasurement(measurement.value, measurement.kind)}`;
+        row.appendChild(measurementEl);
+      }
+
+      if (annotation.type === 'triangle') {
+        const triText = triangleSummary(annotation.geometry.points);
+        if (triText) {
+          const triEl = document.createElement('span');
+          triEl.className = 'annotation-coords';
+          triEl.textContent = triText;
+          row.appendChild(triEl);
+        }
+      }
+
+      if (annotation.type === 'rect') {
+        const rectText = rectangleSummary(annotation.geometry);
+        if (rectText) {
+          const rectEl = document.createElement('span');
+          rectEl.className = 'annotation-coords';
+          rectEl.textContent = rectText;
+          row.appendChild(rectEl);
+        }
+      }
+
+      const delBtn = document.createElement('button');
+      delBtn.textContent = '✕';
+      delBtn.title = 'Delete annotation';
+      delBtn.addEventListener('click', event => {
+        event.stopPropagation();
+        deleteAnnotation(annotation.id);
+      });
+      row.appendChild(delBtn);
+
+      item.appendChild(row);
+      list.appendChild(item);
+    }
+  }
+
+  function refreshProperties() {
+    const panel = $('#properties-content');
+    panel.innerHTML = '';
+    if (appState.selection.length !== 1) {
+      panel.textContent = 'Select an annotation to edit its properties.';
+      return;
+    }
+    const annotation = appState.annotations.find(a => a.id === appState.selection[0]);
+    if (!annotation) {
+      panel.textContent = 'Select an annotation to edit its properties.';
+      return;
+    }
+
+    panel.appendChild(makeInput('Stroke color', 'color', annotation.style.stroke || '#000000', value => {
+      annotation.style.stroke = value;
+      scheduleRedraw();
+      scheduleAutosave();
+    }));
+
+    panel.appendChild(makeInput('Fill color', 'color', annotation.style.fill || '#000000', value => {
+      annotation.style.fill = value;
+      scheduleRedraw();
+      scheduleAutosave();
+    }));
+
+    panel.appendChild(makeInput('Stroke width', 'number', annotation.style.strokeWidth || 2, value => {
+      annotation.style.strokeWidth = Number(value);
+      scheduleRedraw();
+      scheduleAutosave();
+    }, { min: 1, max: 20 }));
+
+    panel.appendChild(makeInput('Opacity', 'range', annotation.style.opacity ?? 1, value => {
+      annotation.style.opacity = Number(value);
+      scheduleRedraw();
+      scheduleAutosave();
+    }, { min: 0.1, max: 1, step: 0.05 }));
+
+    if (annotation.type === 'text') {
+      panel.appendChild(makeInput('Text', 'text', annotation.geometry.content, value => {
+        annotation.geometry.content = value;
+        scheduleRedraw();
+        scheduleAutosave();
+      }));
+
+      panel.appendChild(makeInput('Text size', 'number', annotation.style.textSize || 16, value => {
+        annotation.style.textSize = Number(value);
+        scheduleRedraw();
+        scheduleAutosave();
+      }, { min: 8, max: 72 }));
+    }
+  }
+
+  function makeInput(labelText, type, value, onChange, attrs = {}) {
+    const wrapper = document.createElement('div');
+    const label = document.createElement('label');
+    label.textContent = labelText;
+    const input = document.createElement('input');
+    input.type = type;
+    input.value = value;
+    for (const [k, v] of Object.entries(attrs)) {
+      input[k] = v;
+    }
+    input.addEventListener('input', () => onChange(input.value));
+    wrapper.appendChild(label);
+    wrapper.appendChild(input);
+    return wrapper;
+  }
+
+  function deleteAnnotation(id) {
+    if (isAnnotationLocked(id)) {
+      toast('Unlock the annotation or its layer before deleting');
+      return;
+    }
+    const index = appState.annotations.findIndex(a => a.id === id);
+    if (index === -1) return;
+    appState.annotations.splice(index, 1);
+    for (const layer of appState.layers) {
+      const idx = layer.children.indexOf(id);
+      if (idx !== -1) layer.children.splice(idx, 1);
+    }
+    appState.selection = [];
+    pushHistory('Delete annotation');
+    scheduleRedraw();
+    refreshUI();
+  }
+
+  /* ==========================================
+     Persistence & Export
+     ========================================== */
+
+  function exportPNG() {
+    if (!appState.image) {
+      toast('Load an image before exporting PNG');
+      return;
+    }
+    const offscreen = document.createElement('canvas');
+    offscreen.width = appState.image.width;
+    offscreen.height = appState.image.height;
+    const offCtx = offscreen.getContext('2d');
+    offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
+    offCtx.drawImage(appState.image, 0, 0);
+    for (const annotation of appState.annotations) {
+      if (!isAnnotationVisible(annotation.id)) continue;
+      drawAnnotationToContext(offCtx, annotation);
+    }
+    offscreen.toBlob(blob => {
+      if (!blob) {
+        toast('Export failed');
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'annotation.png';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('PNG export complete');
+    });
+  }
+
+  function drawAnnotationToContext(context, annotation) {
+    context.save();
+    context.globalAlpha = annotation.style.opacity ?? 1;
+    context.lineWidth = annotation.style.strokeWidth || TOOL_DEFAULTS.strokeWidth;
+    context.strokeStyle = annotation.style.stroke || TOOL_DEFAULTS.stroke;
+    context.fillStyle = annotation.style.fill || TOOL_DEFAULTS.fill;
+
+    switch (annotation.type) {
+      case 'point':
+        context.beginPath();
+        context.arc(annotation.geometry.x, annotation.geometry.y, 4, 0, Math.PI * 2);
+        context.fill();
+        context.stroke();
+        break;
+      case 'line':
+        context.beginPath();
+        context.moveTo(annotation.geometry.start.x, annotation.geometry.start.y);
+        context.lineTo(annotation.geometry.end.x, annotation.geometry.end.y);
+        context.stroke();
+        break;
+      case 'polyline':
+        context.beginPath();
+        annotation.geometry.points.forEach((pt, idx) => {
+          if (idx === 0) context.moveTo(pt.x, pt.y);
+          else context.lineTo(pt.x, pt.y);
+        });
+        context.stroke();
+        break;
+      case 'rect':
+        context.beginPath();
+        context.rect(annotation.geometry.x, annotation.geometry.y, annotation.geometry.width, annotation.geometry.height);
+        context.fill();
+        context.stroke();
+        break;
+      case 'ellipse':
+        context.beginPath();
+        context.ellipse(
+          annotation.geometry.x + annotation.geometry.width / 2,
+          annotation.geometry.y + annotation.geometry.height / 2,
+          Math.abs(annotation.geometry.width) / 2,
+          Math.abs(annotation.geometry.height) / 2,
+          0,
+          0,
+          Math.PI * 2
+        );
+        context.fill();
+        context.stroke();
+        break;
+      case 'polygon':
+        context.beginPath();
+        annotation.geometry.points.forEach((pt, idx) => {
+          if (idx === 0) context.moveTo(pt.x, pt.y);
+          else context.lineTo(pt.x, pt.y);
+        });
+        context.closePath();
+        context.fill();
+        context.stroke();
+        break;
+      case 'triangle':
+        context.beginPath();
+        annotation.geometry.points.forEach((pt, idx) => {
+          if (idx === 0) context.moveTo(pt.x, pt.y);
+          else context.lineTo(pt.x, pt.y);
+        });
+        context.closePath();
+        context.fill();
+        context.stroke();
+        break;
+      case 'angle':
+        context.beginPath();
+        context.moveTo(annotation.geometry.a.x, annotation.geometry.a.y);
+        context.lineTo(annotation.geometry.b.x, annotation.geometry.b.y);
+        context.lineTo(annotation.geometry.c.x, annotation.geometry.c.y);
+        context.stroke();
+        break;
+      case 'text':
+        context.save();
+        context.font = `${annotation.style.textSize || TOOL_DEFAULTS.textSize}px/1.2 sans-serif`;
+        context.fillStyle = annotation.style.textColor || TOOL_DEFAULTS.textColor;
+        context.fillText(annotation.geometry.content, annotation.geometry.position.x, annotation.geometry.position.y);
+        context.restore();
+        break;
+    }
+
+    context.restore();
+  }
+
+  function exportProjectJSON() {
+    const payload = serializeState();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'project.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('Project JSON exported');
+  }
+
+  function importProjectJSON(file) {
+    file.text().then(text => {
+      try {
+        const payload = JSON.parse(text);
+        if (!payload || payload.schemaVersion !== SCHEMA_VERSION) {
+          throw new Error('Unsupported project format');
+        }
+        restoreSnapshot(payload);
+        pushHistory('Import project');
+        toast('Project loaded');
+      } catch (err) {
+        console.error(err);
+        toast('Failed to load project');
+      }
+    });
+  }
+
+  function resetCanvas() {
+    appState.image = null;
+    appState.viewport.zoom = 1;
+    appState.viewport.panX = 0;
+    appState.viewport.panY = 0;
+    appState.annotations = [];
+    appState.layers = [{ id: 'base', name: 'Annotations', visible: true, locked: false, children: [] }];
+    appState.selection = [];
+    appState.draft = null;
+    appState.calibration = null;
+    appState.vanishingPoints = defaultVanishingPoints();
+    appState.history = { stack: [], index: -1 };
+    localStorage.removeItem(AUTOSAVE_KEY);
+    resetModifiers();
+    activeHandle = null;
+    scheduleRedraw();
+    refreshUI();
+    updateMeasurementStatus(null);
+    toast('Canvas reset');
+  }
+
+  /* ==========================================
+     Image Loading
+     ========================================== */
+
+  function loadImage(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        appState.image = img;
+        appState.viewport.zoom = 1;
+        appState.viewport.panX = 0;
+        appState.viewport.panY = 0;
+        fitImage();
+        scheduleRedraw();
+        pushHistory('Load image');
+        toast('Image loaded');
+      };
+      img.src = reader.result;
+    };
+    reader.onerror = () => toast('Failed to read image');
+    reader.readAsDataURL(file);
+  }
+
+  function fitImage() {
+    if (!appState.image) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = (rect.width * appState.viewport.dpr) / appState.image.width;
+    const scaleY = (rect.height * appState.viewport.dpr) / appState.image.height;
+    const zoom = Math.min(scaleX, scaleY);
+    appState.viewport.zoom = zoom;
+    appState.viewport.panX = (canvas.width - appState.image.width * zoom) / 2;
+    appState.viewport.panY = (canvas.height - appState.image.height * zoom) / 2;
+    updateZoomStatus();
+    scheduleRedraw();
+  }
+
+  function setViewPreset(preset) {
+    if (!appState.image) {
+      toast('Load an image first');
+      return;
+    }
+    switch (preset) {
+      case 'fit':
+        fitImage();
+        return;
+      case 'fill': {
+        const rect = canvas.getBoundingClientRect();
+        const zoom = Math.max(
+          (rect.width * appState.viewport.dpr) / appState.image.width,
+          (rect.height * appState.viewport.dpr) / appState.image.height
+        );
+        appState.viewport.zoom = zoom;
+        appState.viewport.panX = (canvas.width - appState.image.width * zoom) / 2;
+        appState.viewport.panY = (canvas.height - appState.image.height * zoom) / 2;
+        break;
+      }
+      case '100':
+        appState.viewport.zoom = 1;
+        appState.viewport.panX = (canvas.width - appState.image.width) / 2;
+        appState.viewport.panY = (canvas.height - appState.image.height) / 2;
+        break;
+      case 'actual':
+        appState.viewport.zoom = window.devicePixelRatio || 1;
+        appState.viewport.panX = (canvas.width - appState.image.width * appState.viewport.zoom) / 2;
+        appState.viewport.panY = (canvas.height - appState.image.height * appState.viewport.zoom) / 2;
+        break;
+    }
+    appState.viewport.zoom = clamp(appState.viewport.zoom, MIN_ZOOM, MAX_ZOOM);
+    updateZoomStatus();
+    scheduleRedraw();
+  }
+
+  /* ==========================================
+     Draft multi-stage completion
+     ========================================== */
+
+  canvas.addEventListener('dblclick', event => {
+    if (!appState.draft) return;
+    if (PATH_TOOLS.has(appState.draft.type)) {
+      finishDrawing();
+    }
+  });
+
+  canvas.addEventListener('click', handleAngleClick);
+
+  /* ==========================================
+     Tabs & UI
+     ========================================== */
+
+  function setupTabs() {
+    const buttons = $$('aside .tabs button');
+    buttons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        buttons.forEach(b => {
+          b.classList.toggle('active', b === btn);
+          b.setAttribute('aria-selected', b === btn);
+        });
+        $$('.panel').forEach(panel => {
+          panel.classList.toggle('active', panel.id === `${btn.dataset.tab}-panel`);
+        });
+      });
+    });
+  }
+
+  /* ==========================================
+     Event Wiring
+     ========================================== */
+
+  function handleKeyDown(event) {
+    applyModifier(event, true);
+    if (event.target && ['INPUT', 'TEXTAREA'].includes(event.target.tagName)) return;
+    if (event.key === 'z' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      if (event.shiftKey) {
+        redo();
+      } else {
+        undo();
+      }
+      return;
+    }
+    if (event.key >= '0' && event.key <= '9') {
+      const index = event.key === '0' ? 9 : Number(event.key) - 1;
+      const tool = TOOL_ORDER[index];
+      if (tool) setTool(tool);
+      return;
+    }
+    if (event.key.toLowerCase() === 'c') {
+      setTool('calibrate');
+      return;
+    }
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      if (appState.selection.length) {
+        for (const id of [...appState.selection]) {
+          deleteAnnotation(id);
+        }
+      }
+    }
+  }
+
+  function handleKeyUp(event) {
+    applyModifier(event, false);
+  }
+
+  function setupEvents() {
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    canvas.addEventListener('pointerdown', beginPointer);
+    canvas.addEventListener('pointermove', movePointer);
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', cancelPointer);
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', resetModifiers);
+
+    $('#undo-btn').addEventListener('click', undo);
+    $('#redo-btn').addEventListener('click', redo);
+
+    $('#tool-palette').addEventListener('click', event => {
+      const button = event.target.closest('button');
+      if (!button) return;
+      if (button.dataset.action) {
+        handleToolAction(button.dataset.action);
+        return;
+      }
+      if (button.dataset.tool) {
+        setTool(button.dataset.tool);
+      }
+    });
+
+    $('#snap-toggle').addEventListener('change', event => {
+      appState.settings.snapEnabled = event.target.checked;
+      scheduleAutosave();
+    });
+
+    setupMenus();
+    setupTabs();
+    setupDragAndDrop();
+  }
+
+  function setupMenus() {
+    $$('header .menu').forEach(menu => {
+      const trigger = menu.querySelector('.menu-trigger');
+      trigger.addEventListener('click', () => {
+        const expanded = menu.getAttribute('aria-expanded') === 'true';
+        closeMenus();
+        menu.setAttribute('aria-expanded', (!expanded).toString());
+      });
+      menu.querySelectorAll('.menu-content button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          handleMenuAction(btn);
+          closeMenus();
+        });
+      });
+    });
+
+    document.addEventListener('click', event => {
+      if (!event.target.closest('.menu')) {
+        closeMenus();
+      }
+    });
+  }
+
+  function closeMenus() {
+    $$('header .menu').forEach(menu => menu.setAttribute('aria-expanded', 'false'));
+  }
+
+  function handleMenuAction(button) {
+    const action = button.dataset.action;
+    const viewPreset = button.dataset.view;
+    const axis = button.dataset.axis;
+    switch (action) {
+      case 'open-image':
+        $('#hidden-image-input').click();
+        break;
+      case 'save-project':
+        exportProjectJSON();
+        break;
+      case 'load-project':
+        $('#hidden-project-input').click();
+        break;
+      case 'export-png':
+        exportPNG();
+        break;
+      case 'reset':
+        resetCanvas();
+        break;
+      case 'set-vanishing':
+        if (axis) {
+          promptVanishingPoint(axis);
+        }
+        break;
+      default:
+        if (viewPreset) {
+          setViewPreset(viewPreset);
+        }
+    }
+  }
+
+  function handleToolAction(action) {
+    switch (action) {
+      case 'extend-vp':
+        extendSelectedLinesToVanishingPoints();
+        break;
+    }
+  }
+
+  function promptVanishingPoint(axis) {
+    const labels = { left: 'Left', right: 'Right', vertical: 'Vertical' };
+    const current = appState.vanishingPoints?.[axis] || { x: 0, y: 0 };
+    const fallback = `${formatNumber(current.x, 1)}, ${formatNumber(current.y, 1)}`;
+    const input = prompt(`Enter ${labels[axis] || axis} vanishing point as "x,y"`, fallback);
+    if (input == null) return;
+    const parts = input.split(',').map(part => part.trim());
+    if (parts.length !== 2) {
+      toast('Enter coordinates as "x,y"');
+      return;
+    }
+    const x = Number(parts[0]);
+    const y = Number(parts[1]);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      toast('Invalid coordinates');
+      return;
+    }
+    appState.vanishingPoints[axis] = { x, y };
+    scheduleRedraw();
+    scheduleAutosave();
+    toast(`${labels[axis] || axis} vanishing point updated`);
+  }
+
+  function setupDragAndDrop() {
+    ['dragenter', 'dragover'].forEach(evt => {
+      canvas.addEventListener(evt, event => {
+        event.preventDefault();
+      });
+    });
+    canvas.addEventListener('drop', event => {
+      event.preventDefault();
+      const file = Array.from(event.dataTransfer.files).find(f => f.type.startsWith('image/'));
+      if (file) loadImage(file);
+    });
+
+    $('#hidden-image-input').addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      if (file) loadImage(file);
+      event.target.value = '';
+    });
+
+    $('#hidden-project-input').addEventListener('change', event => {
+      const file = event.target.files?.[0];
+      if (file) importProjectJSON(file);
+      event.target.value = '';
+    });
+  }
+
+  /* ==========================================
+     Autosave recovery
+     ========================================== */
+
+  function recoverAutosave() {
+    const saved = localStorage.getItem(AUTOSAVE_KEY);
+    if (!saved) return;
+    try {
+      const payload = JSON.parse(saved);
+      if (payload && payload.schemaVersion === SCHEMA_VERSION) {
+        restoreSnapshot(payload);
+        toast('Session restored from autosave');
+      }
+    } catch (err) {
+      console.error('Autosave recovery failed', err);
+    }
+  }
+
+  /* ==========================================
+     Boot
+     ========================================== */
+
+  function boot() {
+    setupEvents();
+    recoverAutosave();
+    refreshUI();
+    updateZoomStatus();
+    updateMeasurementStatus(null);
+    scheduleRedraw();
+  }
+
+  document.addEventListener('DOMContentLoaded', boot);
+})();
+</script>
+</body>
+</html>
